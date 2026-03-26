@@ -4,9 +4,9 @@
     "name": "checkpoint-500mb",
     "tool": "bytehaul",
     "file": "500MB-checkpoint",
-    "seconds": 0.024,
+    "seconds": 10.872,
     "size_mb": 500,
-    "speed_mbps": 21142.99,
+    "speed_mbps": 45.99,
     "extra": ""
   },
   {
@@ -14,9 +14,9 @@
     "name": "checkpoint-500mb",
     "tool": "scp",
     "file": "500MB-checkpoint",
-    "seconds": 21.994,
+    "seconds": 21.839,
     "size_mb": 500,
-    "speed_mbps": 22.73,
+    "speed_mbps": 22.9,
     "extra": ""
   },
   {
@@ -24,9 +24,9 @@
     "name": "checkpoint-500mb-compressed",
     "tool": "bytehaul-zstd",
     "file": "500MB-checkpoint",
-    "seconds": 0.024,
+    "seconds": 11.064,
     "size_mb": 500,
-    "speed_mbps": 20412.23,
+    "speed_mbps": 45.19,
     "extra": ""
   },
   {
@@ -34,9 +34,9 @@
     "name": "dataset-600files",
     "tool": "bytehaul",
     "file": "600x200KB",
-    "seconds": 0.026,
+    "seconds": 0.404,
     "size_mb": 117,
-    "speed_mbps": 4575.22,
+    "speed_mbps": 289.54,
     "extra": ""
   },
   {
@@ -44,9 +44,9 @@
     "name": "dataset-600files",
     "tool": "rsync",
     "file": "600x200KB",
-    "seconds": 1.617,
+    "seconds": 1.63,
     "size_mb": 117,
-    "speed_mbps": 72.34,
+    "speed_mbps": 71.77,
     "extra": ""
   },
   {
@@ -54,9 +54,9 @@
     "name": "dataset-600files",
     "tool": "tar-ssh",
     "file": "600x200KB",
-    "seconds": 1.595,
+    "seconds": 1.52,
     "size_mb": 117,
-    "speed_mbps": 73.36,
+    "speed_mbps": 76.95,
     "extra": ""
   },
   {
@@ -64,9 +64,9 @@
     "name": "delta-sync-10pct",
     "tool": "bytehaul-delta",
     "file": "500MB-10pct-changed",
-    "seconds": 0.025,
+    "seconds": 9.034,
     "size_mb": 500,
-    "speed_mbps": 20187.83,
+    "speed_mbps": 55.35,
     "extra": ""
   },
   {
@@ -74,9 +74,9 @@
     "name": "full-resend",
     "tool": "bytehaul",
     "file": "500MB-full",
-    "seconds": 0.023,
+    "seconds": 11.087,
     "size_mb": 500,
-    "speed_mbps": 21771.18,
+    "speed_mbps": 45.1,
     "extra": ""
   },
   {
@@ -84,9 +84,9 @@
     "name": "full-resend",
     "tool": "scp",
     "file": "500MB-full",
-    "seconds": 21.816,
+    "seconds": 21.753,
     "size_mb": 500,
-    "speed_mbps": 22.92,
+    "speed_mbps": 22.99,
     "extra": ""
   },
   {
@@ -94,7 +94,7 @@
     "name": "pull-100mb",
     "tool": "bytehaul-pull",
     "file": "100MB-pull",
-    "seconds": 32.511,
+    "seconds": 32.44,
     "size_mb": 100,
     "speed_mbps": 3.08,
     "extra": ""
@@ -104,9 +104,9 @@
     "name": "pull-100mb",
     "tool": "scp-pull",
     "file": "100MB-pull",
-    "seconds": 1.796,
+    "seconds": 1.793,
     "size_mb": 100,
-    "speed_mbps": 55.68,
+    "speed_mbps": 55.78,
     "extra": ""
   },
   {
@@ -114,9 +114,9 @@
     "name": "pull-dir-50files",
     "tool": "bytehaul-pull-r",
     "file": "50x2MB-pull",
-    "seconds": 32.036,
+    "seconds": 31.774,
     "size_mb": 100,
-    "speed_mbps": 3.12,
+    "speed_mbps": 3.15,
     "extra": ""
   },
   {
@@ -124,9 +124,9 @@
     "name": "artifacts-compressed",
     "tool": "bytehaul-zstd",
     "file": "configs+logs+metrics",
-    "seconds": 0.023,
+    "seconds": 0.267,
     "size_mb": 10,
-    "speed_mbps": 428.89,
+    "speed_mbps": 37.39,
     "extra": ""
   },
   {
@@ -134,9 +134,9 @@
     "name": "fanout-single",
     "tool": "bytehaul",
     "file": "500MB-single-dest",
-    "seconds": 0.024,
+    "seconds": 9.617,
     "size_mb": 500,
-    "speed_mbps": 21064.84,
+    "speed_mbps": 51.99,
     "extra": ""
   },
   {
@@ -144,9 +144,9 @@
     "name": "large-model-5gb",
     "tool": "bytehaul",
     "file": "5GB-model",
-    "seconds": 0.024,
+    "seconds": 55.165,
     "size_mb": 5120,
-    "speed_mbps": 215344.87,
+    "speed_mbps": 92.81,
     "extra": ""
   },
   {
@@ -154,9 +154,9 @@
     "name": "large-model-5gb",
     "tool": "scp",
     "file": "5GB-model",
-    "seconds": 97.952,
+    "seconds": 99.705,
     "size_mb": 5120,
-    "speed_mbps": 52.27,
+    "speed_mbps": 51.35,
     "extra": ""
   }
 ]
