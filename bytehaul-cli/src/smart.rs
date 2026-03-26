@@ -45,9 +45,10 @@ pub async fn run(source: &str, destination: &str, daemon: Option<&str>) -> Resul
 
     // ── Auto-detect optimal settings ──
     let mut config = TransferConfig::builder()
-        .resume(true) // Always resume
-        .delta(true)  // Always try delta
-        .congestion(CongestionMode::Aggressive) // Maximize throughput
+        .resume(true)      // Always resume
+        .delta(true)       // Always try delta
+        .adaptive(true)    // Auto-detect loss, tune congestion + FEC
+        .congestion(CongestionMode::Aggressive) // Start aggressive, adaptive may switch
         .block_size_mb(16);
 
     // Auto-compress: sample first file to check compressibility

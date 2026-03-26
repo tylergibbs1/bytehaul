@@ -99,6 +99,7 @@ impl Client {
                 .unwrap_or(0),
             compress: self.config.compress,
             compress_level: self.config.compress_level,
+            adaptive: self.config.adaptive,
             ..Default::default()
         }
     }

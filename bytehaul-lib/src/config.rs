@@ -18,6 +18,7 @@ pub struct TransferConfig {
     pub encrypt_state: bool,
     pub compress: bool,
     pub compress_level: i32,
+    pub adaptive: bool,
 }
 
 impl Default for TransferConfig {
@@ -34,6 +35,7 @@ impl Default for TransferConfig {
             encrypt_state: false,
             compress: false,
             compress_level: bytehaul_proto::compress::DEFAULT_COMPRESSION_LEVEL,
+            adaptive: false,
         }
     }
 }
@@ -108,6 +110,11 @@ impl TransferConfigBuilder {
 
     pub fn compress_level(mut self, level: i32) -> Self {
         self.config.compress_level = level;
+        self
+    }
+
+    pub fn adaptive(mut self, enabled: bool) -> Self {
+        self.config.adaptive = enabled;
         self
     }
 
