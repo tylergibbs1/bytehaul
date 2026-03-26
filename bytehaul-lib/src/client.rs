@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
-use bytehaul_proto::engine::{EngineConfig, Sender, TransferProgress};
+use bytehaul_proto::engine::{EngineConfig, Receiver, Sender, TransferProgress};
 use bytehaul_proto::filter::FileFilter;
 use bytehaul_proto::transport::{QuicClient, QuicConnection};
 
@@ -127,6 +127,32 @@ impl Client {
         })
     }
 
+    /// Pull a single file from the remote to a local destination.
+    pub async fn pull_file(&self, remote_path: &str, local_dest: &str) -> Result<Transfer> {
+        Ok(Transfer {
+            conn: self.conn.clone(),
+            config: self.make_engine_config(),
+            source: TransferSource::PullFile {
+                remote_path: remote_path.to_string(),
+                local_dest: local_dest.to_string(),
+            },
+            progress_cb: None,
+        })
+    }
+
+    /// Pull a directory from the remote to a local destination.
+    pub async fn pull_directory(&self, remote_path: &str, local_dest: &str) -> Result<Transfer> {
+        Ok(Transfer {
+            conn: self.conn.clone(),
+            config: self.make_engine_config(),
+            source: TransferSource::PullDirectory {
+                remote_path: remote_path.to_string(),
+                local_dest: local_dest.to_string(),
+            },
+            progress_cb: None,
+        })
+    }
+
     /// Send a directory with glob-based include/exclude filtering.
     pub async fn send_directory_filtered(
         &self,
@@ -152,6 +178,8 @@ enum TransferSource {
     File { local_path: String, remote_path: String },
     Directory { local_dir: String, remote_dir: String },
     FilteredDirectory { local_dir: String, remote_dir: String, filter: FileFilter },
+    PullFile { remote_path: String, local_dest: String },
+    PullDirectory { remote_path: String, local_dest: String },
 }
 
 /// A prepared transfer that can be observed and awaited.
@@ -170,28 +198,59 @@ impl Transfer {
 
     /// Execute the transfer and wait for completion.
     pub async fn wait(self) -> Result<()> {
-        let mut sender = Sender::new(self.config);
-        if let Some(cb) = self.progress_cb {
-            sender.set_progress_callback(cb);
-        }
         match self.source {
-            TransferSource::File { local_path, remote_path } => {
-                sender
-                    .send_file(&self.conn, Path::new(&local_path), &remote_path)
+            TransferSource::PullFile { remote_path, local_dest } => {
+                let mut receiver = Receiver::new(self.config)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                if let Some(cb) = self.progress_cb {
+                    receiver.set_progress_callback(cb);
+                }
+                receiver
+                    .pull_receive(&self.conn, &remote_path, false, Path::new(&local_dest))
                     .await
+                    .map(|_| ())
                     .map_err(|e| anyhow::anyhow!(e))
             }
-            TransferSource::Directory { local_dir, remote_dir } => {
-                sender
-                    .send_directory(&self.conn, Path::new(&local_dir), &remote_dir)
+            TransferSource::PullDirectory { remote_path, local_dest } => {
+                let mut receiver = Receiver::new(self.config)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                if let Some(cb) = self.progress_cb {
+                    receiver.set_progress_callback(cb);
+                }
+                receiver
+                    .pull_receive(&self.conn, &remote_path, true, Path::new(&local_dest))
                     .await
+                    .map(|_| ())
                     .map_err(|e| anyhow::anyhow!(e))
             }
-            TransferSource::FilteredDirectory { local_dir, remote_dir, filter } => {
-                sender
-                    .send_directory_filtered(&self.conn, Path::new(&local_dir), &remote_dir, &filter)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))
+            _ => {
+                let mut sender = Sender::new(self.config);
+                if let Some(cb) = self.progress_cb {
+                    sender.set_progress_callback(cb);
+                }
+                match self.source {
+                    TransferSource::File { local_path, remote_path } => {
+                        sender
+                            .send_file(&self.conn, Path::new(&local_path), &remote_path)
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e))
+                    }
+                    TransferSource::Directory { local_dir, remote_dir } => {
+                        sender
+                            .send_directory(&self.conn, Path::new(&local_dir), &remote_dir)
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e))
+                    }
+                    TransferSource::FilteredDirectory { local_dir, remote_dir, filter } => {
+                        sender
+                            .send_directory_filtered(&self.conn, Path::new(&local_dir), &remote_dir, &filter)
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e))
+                    }
+                    TransferSource::PullFile { .. } | TransferSource::PullDirectory { .. } => {
+                        unreachable!()
+                    }
+                }
             }
         }
     }

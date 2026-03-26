@@ -1,11 +1,12 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{info, warn};
 
-use bytehaul_proto::engine::{EngineConfig, Receiver, TransferProgress};
+use bytehaul_proto::engine::{EngineConfig, Receiver, Sender, TransferProgress};
 use bytehaul_proto::transport::{QuicServer, TransportConfig};
+use bytehaul_proto::wire::{self, ControlMessage, ErrorCode};
 
 use crate::config::TransferConfig;
 
@@ -46,6 +47,12 @@ impl Server {
     }
 
     /// Accept and handle a single incoming transfer.
+    ///
+    /// Reads the first control message to decide whether this is a normal
+    /// send (Manifest) or a pull request (PullRequest).
+    ///  - **Manifest**: the server acts as Receiver (existing behaviour).
+    ///  - **PullRequest**: the server builds a manifest from the requested
+    ///    path and acts as Sender on the same connection.
     pub async fn accept_transfer(
         &self,
         progress_cb: Option<Box<dyn Fn(TransferProgress) + Send + Sync>>,
@@ -68,16 +75,92 @@ impl Server {
             ..Default::default()
         };
 
-        let mut receiver =
-            Receiver::new(engine_config).context("Failed to create receiver")?;
-        if let Some(cb) = progress_cb {
-            receiver.set_progress_callback(cb);
-        }
-
-        receiver
-            .receive_transfer(&conn, &self.dest_dir)
+        // Accept the control stream and peek at the first message.
+        let (mut ctrl_send, mut ctrl_recv) = conn
+            .accept_control_stream()
             .await
-            .map_err(|e| anyhow::anyhow!(e))
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let first_msg = wire::read_control_message(&mut ctrl_recv)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        match first_msg {
+            ControlMessage::PullRequest { remote_path, recursive } => {
+                info!(
+                    "Pull request from {}: {} (recursive={})",
+                    conn.remote_addr(),
+                    remote_path,
+                    recursive
+                );
+
+                let path = Path::new(&remote_path);
+                if !path.exists() {
+                    wire::write_control_message(
+                        &mut ctrl_send,
+                        &ControlMessage::Error {
+                            code: ErrorCode::IoError,
+                            message: format!("path not found: {}", remote_path),
+                        },
+                    )
+                    .await
+                    .ok();
+                    anyhow::bail!("Requested pull path not found: {}", remote_path);
+                }
+
+                let mut sender = Sender::new(engine_config);
+                if let Some(cb) = progress_cb {
+                    sender.set_progress_callback(cb);
+                }
+
+                sender
+                    .serve_pull(&conn, &mut ctrl_send, &mut ctrl_recv, path, recursive)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?;
+
+                // Return empty vec — the server didn't write any files locally.
+                Ok(Vec::new())
+            }
+            ControlMessage::Manifest { manifest_bytes } => {
+                // Normal send flow.  We already consumed the Manifest message,
+                // so we cannot simply call receive_transfer (which expects to
+                // read it).  Instead, use the lower-level
+                // receive_transfer_with_manifest that accepts pre-read streams.
+                let mut receiver =
+                    Receiver::new(engine_config).context("Failed to create receiver")?;
+                if let Some(cb) = progress_cb {
+                    receiver.set_progress_callback(cb);
+                }
+
+                receiver
+                    .receive_transfer_preread(
+                        &conn,
+                        &self.dest_dir,
+                        manifest_bytes,
+                        ctrl_send,
+                        ctrl_recv,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            }
+            other => {
+                warn!(
+                    "Unexpected first control message from {}: {:?}",
+                    conn.remote_addr(),
+                    other
+                );
+                wire::write_control_message(
+                    &mut ctrl_send,
+                    &ControlMessage::Error {
+                        code: ErrorCode::ProtocolError,
+                        message: "expected Manifest or PullRequest as first message".into(),
+                    },
+                )
+                .await
+                .ok();
+                anyhow::bail!("Unexpected first control message");
+            }
+        }
     }
 
     /// Run the server loop, accepting transfers until interrupted.
