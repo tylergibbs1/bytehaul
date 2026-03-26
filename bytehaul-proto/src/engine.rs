@@ -728,6 +728,262 @@ impl Sender {
         Ok(())
     }
 
+    /// Serve a pull request on an already-accepted connection.
+    ///
+    /// Unlike [`send_transfer`](Self::send_transfer), the control stream has
+    /// already been accepted by the server and the first message
+    /// (`PullRequest`) has already been consumed.  This method builds a
+    /// manifest from `remote_path`, sends it over the provided control
+    /// streams, then streams the file data exactly like a normal send.
+    pub async fn serve_pull(
+        &self,
+        conn: &QuicConnection,
+        ctrl_send: &mut quinn::SendStream,
+        ctrl_recv: &mut quinn::RecvStream,
+        remote_path: &Path,
+        recursive: bool,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
+
+        // Build manifest from the requested path.
+        // Use a dummy dest_dir — the client will place files wherever it likes.
+        let dummy_dest = Path::new("/pull");
+
+        let manifest = if remote_path.is_dir() {
+            if !recursive {
+                return Err(EngineError::Protocol(
+                    "remote path is a directory but recursive was not requested".into(),
+                ));
+            }
+            TransferManifest::from_directory(remote_path, dummy_dest, self.config.block_size)
+                .await?
+        } else if remote_path.is_file() {
+            let file_hash = verify::hash_file(remote_path).await?;
+            let file_size = tokio::fs::metadata(remote_path).await?.len();
+            TransferManifest::new(
+                vec![FileEntry {
+                    source_path: remote_path.to_path_buf(),
+                    dest_path: dummy_dest.join(
+                        remote_path
+                            .file_name()
+                            .unwrap_or_else(|| std::ffi::OsStr::new("file")),
+                    ),
+                    size: file_size,
+                    blake3_hash: file_hash,
+                    relative_path: None,
+                }],
+                self.config.block_size,
+            )?
+        } else {
+            return Err(EngineError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("remote path not found: {}", remote_path.display()),
+            )));
+        };
+
+        let total_size = manifest.total_size();
+        let total_chunks = manifest.total_blocks();
+
+        info!(
+            "Serving pull {}: {} files, {} bytes, {} blocks",
+            &manifest.transfer_id[..12],
+            manifest.files.len(),
+            total_size,
+            total_chunks
+        );
+
+        // Send manifest over the already-accepted control stream.
+        let manifest_bytes = bincode::serialize(&manifest)?;
+        wire::write_control_message(
+            ctrl_send,
+            &ControlMessage::Manifest { manifest_bytes },
+        )
+        .await?;
+
+        // Wait for resume state from the pulling client.
+        let resume_msg = wire::read_control_message(ctrl_recv).await?;
+        let received_blocks: Vec<u64> = match resume_msg {
+            ControlMessage::ResumeState { blocks_received } => blocks_received,
+            ControlMessage::Error { code, message } => {
+                return Err(EngineError::RemoteError { code, message });
+            }
+            _ => {
+                return Err(EngineError::Protocol(
+                    "expected ResumeState message from pull client".into(),
+                ));
+            }
+        };
+
+        let mut bitfield = bitvec![0; total_chunks as usize];
+        for idx in &received_blocks {
+            if (*idx as usize) < bitfield.len() {
+                bitfield.set(*idx as usize, true);
+            }
+        }
+
+        let already_received = received_blocks.len() as u64;
+        if already_received > 0 {
+            info!(
+                "Pull resume: {}/{} chunks already received by client",
+                already_received, total_chunks
+            );
+        }
+
+        let chunk_plan = ChunkPlan::new(total_size, self.config.block_size);
+        let mut scheduler = ChunkScheduler::new(chunk_plan, bitfield);
+
+        if scheduler.is_complete() {
+            let manifest_hash = manifest.manifest_hash();
+            wire::write_control_message(
+                ctrl_send,
+                &ControlMessage::TransferComplete { file_blake3: manifest_hash },
+            )
+            .await?;
+            return Ok(());
+        }
+
+        // Stream chunks in parallel — identical to send_transfer.
+        let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_streams));
+        let mut sent_count = already_received;
+        let mut rate_limiter = BandwidthLimiter::new(self.config.max_bandwidth_bps);
+        let transfer_id_bytes =
+            verify::hex_to_hash(&manifest.transfer_id).unwrap_or([0u8; 32]);
+
+        while !scheduler.is_complete() {
+            let batch = scheduler.next_batch(self.config.max_parallel_streams);
+            if batch.is_empty() {
+                break;
+            }
+
+            let mut handles = Vec::new();
+
+            for chunk_idx in batch {
+                rate_limiter.wait_if_needed(self.config.block_size as u64).await;
+                let permit = semaphore.clone().acquire_owned().await?;
+
+                let (file_idx, local_offset) = match manifest.file_and_offset_for_block(chunk_idx) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let source_path = manifest.files[file_idx].source_path.clone();
+                let file_size = manifest.files[file_idx].size;
+                let remaining = file_size - local_offset;
+                let chunk_size = remaining.min(self.config.block_size as u64) as u32;
+
+                let conn_inner = conn.inner().clone();
+                let tid = transfer_id_bytes;
+
+                let handle = tokio::spawn(async move {
+                    let _permit = permit;
+
+                    let data = ChunkReader::read_chunk(&source_path, local_offset, chunk_size).await?;
+                    let chunk_hash = verify::hash_bytes(&data);
+
+                    let (mut send, _recv) = conn_inner.open_bi().await.map_err(|e| {
+                        EngineError::Protocol(format!("failed to open data stream: {e}"))
+                    })?;
+
+                    let header = ChunkHeader {
+                        transfer_id: tid,
+                        chunk_index: chunk_idx,
+                        chunk_size,
+                        chunk_blake3: chunk_hash,
+                    };
+
+                    wire::write_chunk_header(&mut send, &header).await?;
+                    wire::write_chunk_data(&mut send, &data).await?;
+                    send.finish().map_err(|e| {
+                        EngineError::Protocol(format!("failed to finish stream: {e}"))
+                    })?;
+
+                    debug!("Sent chunk {} ({} bytes)", chunk_idx, chunk_size);
+                    Ok::<u64, EngineError>(chunk_idx)
+                });
+
+                handles.push(handle);
+            }
+
+            for handle in handles {
+                match handle.await? {
+                    Ok(idx) => {
+                        scheduler.mark_received(idx);
+                        sent_count += 1;
+
+                        if let Some(ref cb) = self.progress_cb {
+                            if sent_count.is_multiple_of(self.config.progress_interval_chunks)
+                                || scheduler.is_complete()
+                            {
+                                let elapsed = start.elapsed().as_secs_f64();
+                                let transferred =
+                                    (sent_count * self.config.block_size as u64).min(total_size);
+                                cb(TransferProgress {
+                                    transferred_bytes: transferred,
+                                    total_bytes: total_size,
+                                    transferred_chunks: sent_count,
+                                    total_chunks,
+                                    speed_bytes_per_sec: if elapsed > 0.0 {
+                                        transferred as f64 / elapsed
+                                    } else {
+                                        0.0
+                                    },
+                                    elapsed_secs: elapsed,
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to send chunk during pull: {}", e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        // Wait for client confirmation.
+        let manifest_hash = manifest.manifest_hash();
+        loop {
+            let msg = wire::read_control_message(ctrl_recv).await?;
+            match msg {
+                ControlMessage::ProgressAck { .. } => continue,
+                ControlMessage::TransferComplete { file_blake3 } => {
+                    if file_blake3 == manifest_hash {
+                        info!("Pull transfer complete and verified by client");
+                    } else {
+                        return Err(EngineError::HashMismatch(
+                            "manifest hash mismatch on pull client side".into(),
+                        ));
+                    }
+                    break;
+                }
+                ControlMessage::Error { code, message } => {
+                    return Err(EngineError::RemoteError { code, message });
+                }
+                _ => {}
+            }
+        }
+
+        wire::write_control_message(
+            ctrl_send,
+            &ControlMessage::TransferComplete { file_blake3: manifest_hash },
+        )
+        .await?;
+
+        let elapsed = start.elapsed();
+        info!(
+            "Pull complete: {} files, {} bytes in {:.1}s ({:.1} MB/s)",
+            manifest.files.len(),
+            total_size,
+            elapsed.as_secs_f64(),
+            if elapsed.as_secs_f64() > 0.0 {
+                (total_size as f64 / elapsed.as_secs_f64()) / (1024.0 * 1024.0)
+            } else {
+                0.0
+            }
+        );
+
+        Ok(())
+    }
+
     /// Send an entire directory over the given QUIC connection.
     pub async fn send_directory(
         &self,
@@ -740,6 +996,26 @@ impl Sender {
             local_dir,
             Path::new(remote_dest),
             self.config.block_size,
+        )
+        .await?;
+        info!("Found {} files, {} total", manifest.files.len(), manifest.total_size());
+        self.send_transfer(conn, &manifest).await
+    }
+
+    /// Send a directory with glob-based filtering over the given QUIC connection.
+    pub async fn send_directory_filtered(
+        &self,
+        conn: &QuicConnection,
+        local_dir: &Path,
+        remote_dest: &str,
+        filter: &crate::filter::FileFilter,
+    ) -> Result<()> {
+        info!("Scanning directory (filtered): {}", local_dir.display());
+        let manifest = TransferManifest::from_directory_filtered(
+            local_dir,
+            Path::new(remote_dest),
+            self.config.block_size,
+            filter,
         )
         .await?;
         info!("Found {} files, {} total", manifest.files.len(), manifest.total_size());

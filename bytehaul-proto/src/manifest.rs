@@ -11,6 +11,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
+use crate::filter::FileFilter;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -246,6 +248,77 @@ impl TransferManifest {
                 .strip_prefix(&source_dir)
                 .expect("walkdir entry must be under source_dir")
                 .to_path_buf();
+
+            let (size, blake3_hash) = hash_file(&abs_path).await?;
+
+            let entry = FileEntry {
+                source_path: abs_path,
+                dest_path: dest_dir.join(&rel_path),
+                size,
+                blake3_hash,
+                relative_path: Some(rel_path.clone()),
+            };
+
+            entries.push((rel_path, entry));
+        }
+
+        // Sort by relative path for deterministic ordering.
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        let files: Vec<FileEntry> = entries.into_iter().map(|(_, e)| e).collect();
+
+        if files.is_empty() {
+            return Err(ManifestError::EmptyFileList);
+        }
+
+        Self::new(files, block_size)
+    }
+
+    /// Build a manifest by recursively walking a directory tree, applying a
+    /// [`FileFilter`] to skip files that don't match.
+    ///
+    /// Behaves like [`from_directory`](Self::from_directory) but skips files
+    /// whose relative path does not pass the filter **before** hashing them,
+    /// saving I/O on large trees.
+    pub async fn from_directory_filtered(
+        source_dir: &Path,
+        dest_dir: &Path,
+        block_size: u32,
+        filter: &FileFilter,
+    ) -> Result<Self> {
+        validate_block_size(block_size)?;
+
+        let source_dir = source_dir
+            .canonicalize()
+            .map_err(ManifestError::Io)?;
+
+        let mut entries: Vec<(PathBuf, FileEntry)> = Vec::new();
+
+        for dir_entry in walkdir::WalkDir::new(&source_dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            // Skip symlinks
+            if dir_entry.path_is_symlink() {
+                continue;
+            }
+
+            let ft = dir_entry.file_type();
+            if !ft.is_file() {
+                continue;
+            }
+
+            let abs_path = dir_entry.path().to_path_buf();
+            let rel_path = abs_path
+                .strip_prefix(&source_dir)
+                .expect("walkdir entry must be under source_dir")
+                .to_path_buf();
+
+            // Apply filter before hashing to save I/O.
+            if !filter.matches(&rel_path) {
+                continue;
+            }
 
             let (size, blake3_hash) = hash_file(&abs_path).await?;
 

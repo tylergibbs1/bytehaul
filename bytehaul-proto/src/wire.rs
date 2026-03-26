@@ -131,6 +131,20 @@ pub enum ControlMessage {
         /// Index of the file in the manifest.
         file_index: usize,
     },
+
+    // ── Pull transfer messages (v2) ────────────────────────
+
+    /// Client requests the remote to send files back (reverse transfer).
+    ///
+    /// The remote builds a manifest from `remote_path` and acts as sender
+    /// on the same connection.
+    PullRequest {
+        /// Absolute path on the remote host to pull from.
+        remote_path: String,
+        /// If true and `remote_path` is a directory, recursively include
+        /// all files.
+        recursive: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

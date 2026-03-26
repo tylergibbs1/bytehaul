@@ -3,6 +3,7 @@ mod clean;
 mod completions;
 mod daemon;
 mod init;
+pub mod output;
 mod send;
 mod status;
 
@@ -33,6 +34,10 @@ struct Cli {
     /// Enable verbose logging
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Emit machine-readable JSON events to stdout instead of human output
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -81,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command {
-        Commands::Send(args) => send::run(args).await,
+        Commands::Send(args) => send::run(args, cli.json).await,
         Commands::Daemon(args) => daemon::run(args).await,
         Commands::Bench(args) => bench::run(args).await,
         Commands::Init(args) => init::run(args).await,

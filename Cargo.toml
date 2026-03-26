@@ -50,6 +50,7 @@ chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 humansize = "2"
 walkdir = "2"
+globset = "0.4"
 
 [workspace.lints.rust]
 future-incompatible = "warn"

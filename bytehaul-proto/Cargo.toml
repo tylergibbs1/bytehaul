@@ -23,6 +23,7 @@ chrono = { workspace = true }
 rand = { workspace = true }
 chacha20poly1305 = { workspace = true }
 walkdir = { workspace = true }
+globset = { workspace = true }
 anyhow = { workspace = true }
 
 [lints]

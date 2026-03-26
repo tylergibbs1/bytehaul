@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use bytehaul_proto::engine::{EngineConfig, Sender, TransferProgress};
+use bytehaul_proto::filter::FileFilter;
 use bytehaul_proto::transport::{QuicClient, QuicConnection};
 
 use crate::config::TransferConfig;
@@ -125,12 +126,32 @@ impl Client {
             progress_cb: None,
         })
     }
+
+    /// Send a directory with glob-based include/exclude filtering.
+    pub async fn send_directory_filtered(
+        &self,
+        local_dir: &str,
+        remote_dir: &str,
+        filter: FileFilter,
+    ) -> Result<Transfer> {
+        Ok(Transfer {
+            conn: self.conn.clone(),
+            config: self.make_engine_config(),
+            source: TransferSource::FilteredDirectory {
+                local_dir: local_dir.to_string(),
+                remote_dir: remote_dir.to_string(),
+                filter,
+            },
+            progress_cb: None,
+        })
+    }
 }
 
 /// What to transfer.
 enum TransferSource {
     File { local_path: String, remote_path: String },
     Directory { local_dir: String, remote_dir: String },
+    FilteredDirectory { local_dir: String, remote_dir: String, filter: FileFilter },
 }
 
 /// A prepared transfer that can be observed and awaited.
@@ -163,6 +184,12 @@ impl Transfer {
             TransferSource::Directory { local_dir, remote_dir } => {
                 sender
                     .send_directory(&self.conn, Path::new(&local_dir), &remote_dir)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            }
+            TransferSource::FilteredDirectory { local_dir, remote_dir, filter } => {
+                sender
+                    .send_directory_filtered(&self.conn, Path::new(&local_dir), &remote_dir, &filter)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))
             }

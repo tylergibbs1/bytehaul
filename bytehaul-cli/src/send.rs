@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -8,6 +9,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use bytehaul_lib::client::Client;
 use bytehaul_lib::config::TransferConfig;
 use bytehaul_proto::congestion::CongestionMode;
+use bytehaul_proto::filter::FileFilter;
+
+use crate::output::{JsonEvent, OutputMode, Reporter};
 
 #[derive(Args)]
 pub struct SendArgs {
@@ -52,9 +56,17 @@ pub struct SendArgs {
     /// Show what would be transferred without sending
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Include only files matching these glob patterns (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub include: Vec<String>,
+
+    /// Exclude files matching these glob patterns (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub exclude: Vec<String>,
 }
 
-pub async fn run(args: SendArgs) -> Result<()> {
+pub async fn run(args: SendArgs, _json: bool) -> Result<()> {
     let source = PathBuf::from(&args.source);
     if !source.exists() {
         anyhow::bail!("Source file not found: {}", source.display());
@@ -168,9 +180,24 @@ pub async fn run(args: SendArgs) -> Result<()> {
     let source_str = source
         .to_str()
         .context("source path contains invalid UTF-8")?;
-    let mut transfer = if is_dir {
+
+    let has_filters = !args.include.is_empty() || !args.exclude.is_empty();
+
+    let mut transfer = if is_dir && has_filters {
+        let filter = FileFilter::new(&args.include, &args.exclude)
+            .context("Invalid include/exclude glob pattern")?;
+        client
+            .send_directory_filtered(source_str, &remote_path, filter)
+            .await?
+    } else if is_dir {
         client.send_directory(source_str, &remote_path).await?
     } else {
+        if has_filters {
+            eprintln!(
+                "  {} --include/--exclude flags are ignored for single-file transfers",
+                style("warning:").yellow()
+            );
+        }
         client.send_file(source_str, &remote_path).await?
     };
 
