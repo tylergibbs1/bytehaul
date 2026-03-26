@@ -447,7 +447,9 @@ async fn test_directory_transfer() {
     assert_eq!(received_paths.len(), 3, "should receive exactly 3 files");
 
     // Verify each file arrived with correct content by checking hashes.
-    let dest_root = recv_dir.path().join("transferred");
+    // The receiver places files using relative_path (relative to source dir),
+    // under dest_dir directly.
+    let dest_root = recv_dir.path();
     let recv_hash_alpha = verify::hash_file(&dest_root.join("alpha.bin")).await.unwrap();
     let recv_hash_beta = verify::hash_file(&dest_root.join("sub/beta.bin")).await.unwrap();
     let recv_hash_gamma = verify::hash_file(&dest_root.join("sub/deep/gamma.bin")).await.unwrap();
@@ -517,7 +519,7 @@ async fn test_directory_transfer_with_filter() {
     // Only .txt files should have been transferred.
     assert_eq!(received_paths.len(), 2, "should receive exactly 2 .txt files");
 
-    let dest_root = recv_dir.path().join("filtered");
+    let dest_root = recv_dir.path();
     let recv_hash_readme = verify::hash_file(&dest_root.join("readme.txt")).await.unwrap();
     let recv_hash_notes = verify::hash_file(&dest_root.join("docs/notes.txt")).await.unwrap();
 
@@ -578,12 +580,12 @@ async fn test_delta_transfer_unchanged() {
             ..Default::default()
         })
         .expect("receiver");
-        let paths = receiver
-            .receive_transfer(&conn, &recv_dir_path)
+        let path = receiver
+            .receive_file(&conn, &recv_dir_path)
             .await
-            .expect("receive_transfer delta");
+            .expect("receive_file delta");
         conn.close();
-        paths
+        path
     });
 
     let conn = QuicClient::connect(server_addr, "localhost")
@@ -602,11 +604,10 @@ async fn test_delta_transfer_unchanged() {
         .expect("send_file delta");
     conn.close();
 
-    let delta_paths = recv_handle.await.expect("receiver task");
-    assert!(!delta_paths.is_empty(), "should have received at least one file");
+    let delta_path = recv_handle.await.expect("receiver task");
 
     // Verify the received file still matches after the delta transfer.
-    let delta_hash = verify::hash_file(&delta_paths[0])
+    let delta_hash = verify::hash_file(&delta_path)
         .await
         .expect("hash delta");
     assert_eq!(
@@ -671,12 +672,12 @@ async fn test_delta_transfer_partial_change() {
             ..Default::default()
         })
         .expect("receiver");
-        let paths = receiver
-            .receive_transfer(&conn, &recv_dir_path)
+        let path = receiver
+            .receive_file(&conn, &recv_dir_path)
             .await
-            .expect("receive_transfer delta partial");
+            .expect("receive_file delta partial");
         conn.close();
-        paths
+        path
     });
 
     let conn = QuicClient::connect(server_addr, "localhost")
@@ -696,11 +697,10 @@ async fn test_delta_transfer_partial_change() {
         .expect("send_file delta partial");
     conn.close();
 
-    let delta_paths = recv_handle.await.expect("receiver task");
-    assert!(!delta_paths.is_empty(), "should have received at least one file");
+    let delta_path = recv_handle.await.expect("receiver task");
 
     // Verify the received file matches the modified source.
-    let delta_hash = verify::hash_file(&delta_paths[0])
+    let delta_hash = verify::hash_file(&delta_path)
         .await
         .expect("hash delta partial");
     assert_eq!(
@@ -709,6 +709,6 @@ async fn test_delta_transfer_partial_change() {
     );
 
     // Also verify the file size is unchanged.
-    let metadata = tokio::fs::metadata(&delta_paths[0]).await.unwrap();
+    let metadata = tokio::fs::metadata(&delta_path).await.unwrap();
     assert_eq!(metadata.len(), file_size as u64, "file size must remain the same");
 }

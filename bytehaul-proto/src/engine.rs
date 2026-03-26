@@ -575,8 +575,13 @@ impl Sender {
             info!("Skipping {}/{} chunks (resume + delta)", already_received, total_chunks);
         }
 
-        // We need a unified chunk plan that maps global indices to file+offset
-        let chunk_plan = ChunkPlan::new(total_size, self.config.block_size);
+        // Create a chunk plan sized to the manifest's total block count.
+        // For multi-file transfers, total_blocks() counts blocks per-file,
+        // so we cannot use ChunkPlan::new(total_size, block_size) which
+        // would give a different count. Instead, construct a plan whose
+        // total_chunks matches the manifest.
+        let plan_size = total_chunks * self.config.block_size as u64;
+        let chunk_plan = ChunkPlan::new(plan_size, self.config.block_size);
         let mut scheduler = ChunkScheduler::new(chunk_plan, bitfield);
 
         if scheduler.is_complete() {
@@ -833,7 +838,8 @@ impl Sender {
             );
         }
 
-        let chunk_plan = ChunkPlan::new(total_size, self.config.block_size);
+        let plan_size = total_chunks * self.config.block_size as u64;
+        let chunk_plan = ChunkPlan::new(plan_size, self.config.block_size);
         let mut scheduler = ChunkScheduler::new(chunk_plan, bitfield);
 
         if scheduler.is_complete() {
