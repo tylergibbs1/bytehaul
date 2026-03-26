@@ -1,14 +1,28 @@
-mod send;
-mod daemon;
 mod bench;
+mod clean;
+mod completions;
+mod daemon;
+mod init;
+mod send;
+mod status;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(
     name = "bytehaul",
     about = "Fast file transfer over QUIC",
+    long_about = "ByteHaul transfers files over QUIC with parallel streams, BLAKE3 verification,\n\
+                  and resumable transfers. Designed for high-bandwidth, high-latency links\n\
+                  where TCP underperforms.\n\n\
+                  Examples:\n  \
+                    bytehaul send ./data.bin user@remote:/path/\n  \
+                    bytehaul send -r ./dataset/ user@remote:/data/\n  \
+                    bytehaul send --daemon 10.0.0.5:7700 ./file.bin /dest\n  \
+                    bytehaul daemon --port 7700 --dest /data/incoming\n  \
+                    bytehaul status\n  \
+                    bytehaul clean --max-age 3d",
     version,
     propagate_version = true
 )]
@@ -31,11 +45,29 @@ enum Commands {
 
     /// Run transfer benchmarks
     Bench(bench::BenchArgs),
+
+    /// Initialize ByteHaul configuration
+    Init(init::InitArgs),
+
+    /// Show active and recent transfers
+    Status(status::StatusArgs),
+
+    /// Clean up stale transfer state files
+    Clean(clean::CleanArgs),
+
+    /// Generate shell completions
+    Completions(completions::CompletionsArgs),
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // Completions don't need tracing
+    if let Commands::Completions(args) = cli.command {
+        let mut cmd = Cli::command();
+        return completions::run(args, &mut cmd);
+    }
 
     // Initialize tracing
     let filter = if cli.verbose {
@@ -52,5 +84,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Send(args) => send::run(args).await,
         Commands::Daemon(args) => daemon::run(args).await,
         Commands::Bench(args) => bench::run(args).await,
+        Commands::Init(args) => init::run(args).await,
+        Commands::Status(args) => status::run(args).await,
+        Commands::Clean(args) => clean::run(args).await,
+        Commands::Completions(_) => unreachable!(),
     }
 }

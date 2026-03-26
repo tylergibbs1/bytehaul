@@ -183,6 +183,7 @@ dependencies = [
  "bytehaul-proto",
  "chrono",
  "clap",
+ "clap_complete",
  "console",
  "humansize",
  "indicatif",
@@ -335,6 +336,15 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+]
+
+[[package]]
+name = "clap_complete"
+version = "4.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19c9f1dde76b736e3681f28cec9d5a61299cbaae0fce80a68e43724ad56031eb"
+dependencies = [
+ "clap",
 ]
 
 [[package]]

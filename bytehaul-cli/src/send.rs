@@ -48,6 +48,10 @@ pub struct SendArgs {
     /// Delta transfer: only send changed blocks
     #[arg(long)]
     pub delta: bool,
+
+    /// Show what would be transferred without sending
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 pub async fn run(args: SendArgs) -> Result<()> {
@@ -73,6 +77,32 @@ pub async fn run(args: SendArgs) -> Result<()> {
     } else {
         tokio::fs::metadata(&source).await?.len()
     };
+
+    // Dry run: show what would be transferred
+    if args.dry_run {
+        let file_size_display = humansize::format_size(file_size, humansize::BINARY);
+        let block_count = (file_size + (args.block_size as u64 * 1024 * 1024) - 1)
+            / (args.block_size as u64 * 1024 * 1024);
+        if is_dir {
+            let file_count = walkdir::WalkDir::new(&source)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .count();
+            eprintln!("  {} Dry run: would send {} files ({})", style("i").cyan(), file_count, file_size_display);
+        } else {
+            eprintln!("  {} Dry run: would send 1 file ({})", style("i").cyan(), file_size_display);
+        }
+        eprintln!("  Source:      {}", source.display());
+        eprintln!("  Destination: {}", args.destination);
+        eprintln!("  Block size:  {} MB", args.block_size);
+        eprintln!("  Blocks:      {}", block_count);
+        eprintln!("  Streams:     {}", args.parallel);
+        eprintln!("  Congestion:  {}", if args.aggressive { "aggressive" } else { "fair" });
+        eprintln!("  Delta:       {}", if args.delta { "enabled" } else { "disabled" });
+        eprintln!("  Resume:      {}", if args.resume { "enabled" } else { "disabled" });
+        return Ok(());
+    }
 
     // Parse destination: in daemon mode, destination is just a remote path;
     // in SSH mode, it's user@host:/path

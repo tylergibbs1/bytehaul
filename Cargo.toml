@@ -28,6 +28,7 @@ bitvec = "1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 indicatif = "0.17"
 console = "0.15"
 

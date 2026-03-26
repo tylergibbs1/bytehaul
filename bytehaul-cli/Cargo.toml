@@ -16,6 +16,7 @@ path = "src/main.rs"
 bytehaul-lib = { path = "../bytehaul-lib" }
 bytehaul-proto = { path = "../bytehaul-proto" }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 indicatif = { workspace = true }
 console = { workspace = true }
 tokio = { workspace = true }
