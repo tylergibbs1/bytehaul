@@ -234,6 +234,23 @@ impl Sender {
         self.progress_cb = Some(cb);
     }
 
+    async fn wait_for_completion_confirmation(
+        ctrl_recv: &mut quinn::RecvStream,
+        mismatch_msg: &'static str,
+    ) -> Result<()> {
+        loop {
+            let msg = wire::read_control_message(ctrl_recv).await?;
+            match msg {
+                ControlMessage::ProgressAck { .. } => continue,
+                ControlMessage::TransferComplete { .. } => return Ok(()),
+                ControlMessage::Error { code, message } => {
+                    return Err(EngineError::RemoteError { code, message });
+                }
+                _ => return Err(EngineError::Protocol(mismatch_msg.into())),
+            }
+        }
+    }
+
     /// Send a single file over the given QUIC connection.
     pub async fn send_file(
         &self,
@@ -325,10 +342,11 @@ impl Sender {
             .await?;
             // Wait for receiver's confirmation before returning, so callers
             // that tear down the daemon after send exits don't race.
-            match wire::read_control_message(&mut ctrl_recv).await {
-                Ok(ControlMessage::TransferComplete { .. }) => {}
-                _ => {}
-            }
+            Self::wait_for_completion_confirmation(
+                &mut ctrl_recv,
+                "expected TransferComplete from receiver",
+            )
+            .await?;
             return Ok(());
         }
 
@@ -628,10 +646,11 @@ impl Sender {
             )
             .await?;
             // Wait for receiver confirmation before returning.
-            match wire::read_control_message(&mut ctrl_recv).await {
-                Ok(ControlMessage::TransferComplete { .. }) => {}
-                _ => {}
-            }
+            Self::wait_for_completion_confirmation(
+                &mut ctrl_recv,
+                "expected TransferComplete from receiver",
+            )
+            .await?;
             return Ok(());
         }
 
@@ -768,7 +787,8 @@ impl Sender {
             &mut ctrl_send,
             &ControlMessage::TransferComplete { file_blake3: manifest_hash },
         )
-        .await?;
+        .await
+        .ok(); // Best-effort: receiver may have already closed the connection
 
         let elapsed = start.elapsed();
         info!(
@@ -899,6 +919,11 @@ impl Sender {
             wire::write_control_message(
                 ctrl_send,
                 &ControlMessage::TransferComplete { file_blake3: manifest_hash },
+            )
+            .await?;
+            Self::wait_for_completion_confirmation(
+                ctrl_recv,
+                "expected TransferComplete from pull client",
             )
             .await?;
             return Ok(());
@@ -1036,7 +1061,8 @@ impl Sender {
             ctrl_send,
             &ControlMessage::TransferComplete { file_blake3: manifest_hash },
         )
-        .await?;
+        .await
+        .ok(); // Best-effort: client may have already closed the connection
 
         let elapsed = start.elapsed();
         info!(
