@@ -115,6 +115,8 @@ impl Server {
     /// Prints the ready address to stdout for SSH bootstrapping.
     pub async fn run_ephemeral(&self) -> Result<Vec<PathBuf>> {
         println!("BYTEHAUL_READY {}", self.quic_server.local_addr());
-        self.accept_transfer(None).await
+        let result = self.accept_transfer(None).await;
+        self.quic_server.shutdown();
+        result
     }
 }

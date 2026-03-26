@@ -90,7 +90,7 @@ impl Default for TransportConfig {
             bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
             max_concurrent_streams: 16,
             keep_alive_interval: None,
-            idle_timeout: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -414,7 +414,7 @@ mod tests {
     fn default_transport_config_values() {
         let cfg = TransportConfig::default();
         assert_eq!(cfg.max_concurrent_streams, 16);
-        assert_eq!(cfg.idle_timeout, Duration::from_secs(30));
+        assert_eq!(cfg.idle_timeout, Duration::from_secs(5));
         assert!(cfg.keep_alive_interval.is_none());
     }
 
