@@ -1,0 +1,29 @@
+[package]
+name = "bytehaul-proto"
+description = "Core protocol implementation for ByteHaul file transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+quinn = { workspace = true }
+rustls = { workspace = true }
+rcgen = { workspace = true }
+blake3 = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+bitvec = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

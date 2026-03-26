@@ -1,0 +1,16 @@
+[package]
+name = "bytehaul-lib"
+description = "Public Rust library API for ByteHaul file transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytehaul-proto = { path = "../bytehaul-proto" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,41 @@
+services:
+  sender:
+    build:
+      context: ..
+      dockerfile: bench-docker/Dockerfile
+    container_name: bh-sender
+    hostname: sender
+    cap_add:
+      - NET_ADMIN  # Required for tc/netem
+    networks:
+      benchnet:
+        ipv4_address: 172.28.0.10
+    volumes:
+      - bench-data:/data
+    command: ["/usr/sbin/sshd", "-D"]
+
+  receiver:
+    build:
+      context: ..
+      dockerfile: bench-docker/Dockerfile
+    container_name: bh-receiver
+    hostname: receiver
+    cap_add:
+      - NET_ADMIN
+    networks:
+      benchnet:
+        ipv4_address: 172.28.0.20
+    volumes:
+      - recv-data:/recv
+    command: ["/usr/sbin/sshd", "-D"]
+
+networks:
+  benchnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  bench-data:
+  recv-data:

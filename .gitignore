@@ -1,0 +1,8 @@
+/target
+*.swp
+*.swo
+.DS_Store
+.agents/
+.claude/
+.breadcrumbs.json
+skills-lock.json

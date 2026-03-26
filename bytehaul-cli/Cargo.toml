@@ -1,0 +1,28 @@
+[package]
+name = "bytehaul-cli"
+description = "Command-line tool for ByteHaul file transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "bytehaul"
+path = "src/main.rs"
+
+[dependencies]
+bytehaul-lib = { path = "../bytehaul-lib" }
+bytehaul-proto = { path = "../bytehaul-proto" }
+clap = { workspace = true }
+indicatif = { workspace = true }
+console = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+humansize = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

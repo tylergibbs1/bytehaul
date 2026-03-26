@@ -1,0 +1,26 @@
+[package]
+name = "bytehaul-bench"
+description = "Benchmark infrastructure for ByteHaul file transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "bytehaul-bench"
+path = "src/main.rs"
+
+[dependencies]
+bytehaul-lib = { path = "../bytehaul-lib" }
+bytehaul-proto = { path = "../bytehaul-proto" }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+humansize = { workspace = true }
