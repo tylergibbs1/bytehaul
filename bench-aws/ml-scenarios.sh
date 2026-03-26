@@ -166,16 +166,16 @@ echo ""
 
 # ═══ 1-3: Model checkpoint transfer (500MB .pt file) ═══
 log "═══ 1-3: Model checkpoint transfer (500MB) ═══"
-nx; T=$(bh "" "/tmp/checkpoint_step1000.pt") || T=0;  record $N "checkpoint-500mb" "bytehaul" "500MB-checkpoint" "$T" 500
-nx; T=$(sc "/tmp/checkpoint_step1000.pt") || T=0;      record $N "checkpoint-500mb" "scp" "500MB-checkpoint" "$T" 500
-nx; T=$(bh "--compress" "/tmp/checkpoint_step1000.pt") || T=0; record $N "checkpoint-500mb-compressed" "bytehaul-zstd" "500MB-checkpoint" "$T" 500
+nx; T=$(bh "" "/tmp/checkpoint_step1000.pt") || T=-1;  record $N "checkpoint-500mb" "bytehaul" "500MB-checkpoint" "$T" 500
+nx; T=$(sc "/tmp/checkpoint_step1000.pt") || T=-1;      record $N "checkpoint-500mb" "scp" "500MB-checkpoint" "$T" 500
+nx; T=$(bh "--compress" "/tmp/checkpoint_step1000.pt") || T=-1; record $N "checkpoint-500mb-compressed" "bytehaul-zstd" "500MB-checkpoint" "$T" 500
 
 # ═══ 4-6: Dataset staging (600 files, ~120MB) ═══
 log "═══ 4-6: Dataset staging (600 shards) ═══"
-nx; T=$(bh "-r" "/tmp/dataset") || T=0;                record $N "dataset-600files" "bytehaul" "600x200KB" "$T" 117
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rsync -a -e \"ssh \$K\" /tmp/dataset ec2-user@$IPB:/tmp/rv/; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=0
+nx; T=$(bh "-r" "/tmp/dataset") || T=-1;                record $N "dataset-600files" "bytehaul" "600x200KB" "$T" 117
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rsync -a -e \"ssh \$K\" /tmp/dataset ec2-user@$IPB:/tmp/rv/; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
 record $N "dataset-600files" "rsync" "600x200KB" "$T" 117
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); tar cf - /tmp/dataset 2>/dev/null | ssh \$K ec2-user@$IPB 'tar xf - -C /tmp/rv/' 2>/dev/null; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=0
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); tar cf - /tmp/dataset 2>/dev/null | ssh \$K ec2-user@$IPB 'tar xf - -C /tmp/rv/' 2>/dev/null; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
 record $N "dataset-600files" "tar-ssh" "600x200KB" "$T" 117
 
 # ═══ 7-9: Checkpoint sync with delta ═══
@@ -185,41 +185,41 @@ bh "" "/tmp/checkpoint_step1000.pt" >/dev/null
 # Modify 10% (simulate next training step updating some weights)
 R 'dd if=/dev/urandom of=/tmp/checkpoint_step1000.pt bs=1M count=50 conv=notrunc 2>/dev/null'
 # Delta send: use bh_keep to preserve the baseline file at the destination
-nx; T=$(bh_keep "--delta" "/tmp/checkpoint_step1000.pt") || T=0; record $N "delta-sync-10pct" "bytehaul-delta" "500MB-10pct-changed" "$T" 500
+nx; T=$(bh_keep "--delta" "/tmp/checkpoint_step1000.pt") || T=-1; record $N "delta-sync-10pct" "bytehaul-delta" "500MB-10pct-changed" "$T" 500
 # Full re-send for comparison
-nx; T=$(bh "" "/tmp/checkpoint_step1000.pt") || T=0;          record $N "full-resend" "bytehaul" "500MB-full" "$T" 500
-nx; T=$(sc "/tmp/checkpoint_step1000.pt") || T=0;              record $N "full-resend" "scp" "500MB-full" "$T" 500
+nx; T=$(bh "" "/tmp/checkpoint_step1000.pt") || T=-1;          record $N "full-resend" "bytehaul" "500MB-full" "$T" 500
+nx; T=$(sc "/tmp/checkpoint_step1000.pt") || T=-1;              record $N "full-resend" "scp" "500MB-full" "$T" 500
 
 # ═══ 10-12: Pull results from GPU node ═══
 log "═══ 10-12: Pull results from remote ═══"
 # Place a file on the receiver to pull back
 R "K='$RK'; ssh \$K ec2-user@$IPB 'dd if=/dev/urandom of=/tmp/results.pt bs=1M count=100 2>/dev/null'"
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port 7700 --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul pull --daemon '$IPB:7700' /tmp/results.pt /tmp/pulled_results.pt >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\"") || T=0
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port 7700 --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul pull --daemon '$IPB:7700' /tmp/results.pt /tmp/pulled_results.pt >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\"") || T=-1
 record $N "pull-100mb" "bytehaul-pull" "100MB-pull" "$T" 100
-nx; T=$(R "K='$RK'; S=\$(python3 -c 'import time; print(time.time())'); scp -q \$K ec2-user@$IPB:/tmp/results.pt /tmp/pulled_scp.pt; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=0
+nx; T=$(R "K='$RK'; S=\$(python3 -c 'import time; print(time.time())'); scp -q \$K ec2-user@$IPB:/tmp/results.pt /tmp/pulled_scp.pt; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
 record $N "pull-100mb" "scp-pull" "100MB-pull" "$T" 100
 
 # Place a directory on receiver
 R "K='$RK'; ssh \$K ec2-user@$IPB 'mkdir -p /tmp/run_results; for i in \$(seq 1 50); do dd if=/dev/urandom of=/tmp/run_results/eval_\$i.pt bs=1M count=2 2>/dev/null; done'"
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port 7700 --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul pull -r --daemon '$IPB:7700' /tmp/run_results /tmp/pulled_dir >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\"") || T=0
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port 7700 --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul pull -r --daemon '$IPB:7700' /tmp/run_results /tmp/pulled_dir >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\"") || T=-1
 record $N "pull-dir-50files" "bytehaul-pull-r" "50x2MB-pull" "$T" 100
 
 # ═══ 13: Compressible ML artifacts ═══
 log "═══ 13: Compressible artifacts (configs+logs+metrics) ═══"
-nx; T=$(bh "-r --compress" "/tmp/ml_artifacts") || T=0; record $N "artifacts-compressed" "bytehaul-zstd" "configs+logs+metrics" "$T" 10
+nx; T=$(bh "-r --compress" "/tmp/ml_artifacts") || T=-1; record $N "artifacts-compressed" "bytehaul-zstd" "configs+logs+metrics" "$T" 10
 # Without compression for comparison
 # (skip, takes same time since these are tiny)
 
 # ═══ 14: Fan-out to simulated cluster ═══
 log "═══ 14: Simulated fan-out (same dest, sequential) ═══"
 # Can't do true fan-out with 2 instances, but measure the single-dest overhead
-nx; T=$(bh "" "/tmp/checkpoint_step1000.pt") || T=0; record $N "fanout-single" "bytehaul" "500MB-single-dest" "$T" 500
+nx; T=$(bh "" "/tmp/checkpoint_step1000.pt") || T=-1; record $N "fanout-single" "bytehaul" "500MB-single-dest" "$T" 500
 
 # ═══ 15: Large model transfer (5GB) ═══
 log "═══ 15: Large model transfer (5GB) ═══"
-nx; T=$(bh "" "/tmp/large_model.pt") || T=0; record $N "large-model-5gb" "bytehaul" "5GB-model" "$T" 5120
+nx; T=$(bh "" "/tmp/large_model.pt") || T=-1; record $N "large-model-5gb" "bytehaul" "5GB-model" "$T" 5120
 # scp for comparison (will take a while)
-nx; T=$(sc "/tmp/large_model.pt") || T=0;    record $N "large-model-5gb" "scp" "5GB-model" "$T" 5120
+nx; T=$(sc "/tmp/large_model.pt") || T=-1;    record $N "large-model-5gb" "scp" "5GB-model" "$T" 5120
 
 echo ""
 echo "═══════════════════════════════════════════════════"

@@ -323,6 +323,12 @@ impl Sender {
                 },
             )
             .await?;
+            // Wait for receiver's confirmation before returning, so callers
+            // that tear down the daemon after send exits don't race.
+            match wire::read_control_message(&mut ctrl_recv).await {
+                Ok(ControlMessage::TransferComplete { .. }) => {}
+                _ => {}
+            }
             return Ok(());
         }
 
@@ -621,6 +627,11 @@ impl Sender {
                 &ControlMessage::TransferComplete { file_blake3: manifest_hash },
             )
             .await?;
+            // Wait for receiver confirmation before returning.
+            match wire::read_control_message(&mut ctrl_recv).await {
+                Ok(ControlMessage::TransferComplete { .. }) => {}
+                _ => {}
+            }
             return Ok(());
         }
 
