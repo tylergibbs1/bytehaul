@@ -1,0 +1,332 @@
+[
+  {
+    "experiment": 1,
+    "name": "100mb",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.199,
+    "size_mb": 100,
+    "speed_mbps": 16.13,
+    "extra": ""
+  },
+  {
+    "experiment": 2,
+    "name": "100mb",
+    "tool": "scp",
+    "file": "100MB",
+    "seconds": 6.325,
+    "size_mb": 100,
+    "speed_mbps": 15.81,
+    "extra": ""
+  },
+  {
+    "experiment": 3,
+    "name": "100mb",
+    "tool": "rsync-z",
+    "file": "100MB",
+    "seconds": 6.08,
+    "size_mb": 100,
+    "speed_mbps": 16.45,
+    "extra": ""
+  },
+  {
+    "experiment": 4,
+    "name": "100mb",
+    "tool": "rsync",
+    "file": "100MB",
+    "seconds": 6.078,
+    "size_mb": 100,
+    "speed_mbps": 16.45,
+    "extra": ""
+  },
+  {
+    "experiment": 5,
+    "name": "100mb",
+    "tool": "rclone-sftp",
+    "file": "100MB",
+    "seconds": 11.814,
+    "size_mb": 100,
+    "speed_mbps": 8.46,
+    "extra": ""
+  },
+  {
+    "experiment": 6,
+    "name": "100mb",
+    "tool": "tar-ssh",
+    "file": "100MB",
+    "seconds": 5.495,
+    "size_mb": 100,
+    "speed_mbps": 18.2,
+    "extra": ""
+  },
+  {
+    "experiment": 7,
+    "name": "1gb",
+    "tool": "bytehaul",
+    "file": "1GB",
+    "seconds": 6.668,
+    "size_mb": 1024,
+    "speed_mbps": 153.58,
+    "extra": ""
+  },
+  {
+    "experiment": 8,
+    "name": "1gb",
+    "tool": "scp",
+    "file": "1GB",
+    "seconds": 42.75,
+    "size_mb": 1024,
+    "speed_mbps": 23.95,
+    "extra": ""
+  },
+  {
+    "experiment": 9,
+    "name": "1gb",
+    "tool": "rsync",
+    "file": "1GB",
+    "seconds": 42.338,
+    "size_mb": 1024,
+    "speed_mbps": 24.19,
+    "extra": ""
+  },
+  {
+    "experiment": 10,
+    "name": "1gb",
+    "tool": "rclone-sftp",
+    "file": "1GB",
+    "seconds": 11.816,
+    "size_mb": 1024,
+    "speed_mbps": 86.66,
+    "extra": ""
+  },
+  {
+    "experiment": 11,
+    "name": "1gb",
+    "tool": "tar-ssh",
+    "file": "1GB",
+    "seconds": 41.702,
+    "size_mb": 1024,
+    "speed_mbps": 24.56,
+    "extra": ""
+  },
+  {
+    "experiment": 12,
+    "name": "10gb",
+    "tool": "bytehaul",
+    "file": "10GB",
+    "seconds": 7.104,
+    "size_mb": 10240,
+    "speed_mbps": 1441.42,
+    "extra": ""
+  },
+  {
+    "experiment": 13,
+    "name": "10gb",
+    "tool": "scp",
+    "file": "10GB",
+    "seconds": 81.88,
+    "size_mb": 10240,
+    "speed_mbps": 125.06,
+    "extra": ""
+  },
+  {
+    "experiment": 14,
+    "name": "10gb",
+    "tool": "tar-ssh",
+    "file": "10GB",
+    "seconds": 80.65,
+    "size_mb": 10240,
+    "speed_mbps": 126.97,
+    "extra": ""
+  },
+  {
+    "experiment": 15,
+    "name": "dir1000",
+    "tool": "bytehaul-r",
+    "file": "1000x100KB",
+    "seconds": 0.524,
+    "size_mb": 97,
+    "speed_mbps": 184.97,
+    "extra": ""
+  },
+  {
+    "experiment": 16,
+    "name": "dir1000",
+    "tool": "rsync",
+    "file": "1000x100KB",
+    "seconds": 1.843,
+    "size_mb": 97,
+    "speed_mbps": 52.63,
+    "extra": ""
+  },
+  {
+    "experiment": 17,
+    "name": "dir1000",
+    "tool": "rsync-z",
+    "file": "1000x100KB",
+    "seconds": 1.841,
+    "size_mb": 97,
+    "speed_mbps": 52.69,
+    "extra": ""
+  },
+  {
+    "experiment": 18,
+    "name": "dir1000",
+    "tool": "rclone-sftp",
+    "file": "1000x100KB",
+    "seconds": 11.819,
+    "size_mb": 97,
+    "speed_mbps": 8.21,
+    "extra": ""
+  },
+  {
+    "experiment": 19,
+    "name": "dir1000",
+    "tool": "tar-ssh",
+    "file": "1000x100KB",
+    "seconds": 1.661,
+    "size_mb": 97,
+    "speed_mbps": 58.41,
+    "extra": ""
+  },
+  {
+    "experiment": 20,
+    "name": "dir1000",
+    "tool": "scp-r",
+    "file": "1000x100KB",
+    "seconds": 229.847,
+    "size_mb": 97,
+    "speed_mbps": 0.42,
+    "extra": ""
+  },
+  {
+    "experiment": 21,
+    "name": "100mb",
+    "tool": "croc",
+    "file": "100MB",
+    "seconds": 0.06,
+    "size_mb": 100,
+    "speed_mbps": 1661.09,
+    "extra": ""
+  },
+  {
+    "experiment": 22,
+    "name": "confidence-1gb-run1",
+    "tool": "bytehaul",
+    "file": "1GB",
+    "seconds": 6.714,
+    "size_mb": 1024,
+    "speed_mbps": 152.51,
+    "extra": ""
+  },
+  {
+    "experiment": 23,
+    "name": "confidence-1gb-run2",
+    "tool": "bytehaul",
+    "file": "1GB",
+    "seconds": 6.6,
+    "size_mb": 1024,
+    "speed_mbps": 155.14,
+    "extra": ""
+  },
+  {
+    "experiment": 24,
+    "name": "confidence-1gb-run3",
+    "tool": "bytehaul",
+    "file": "1GB",
+    "seconds": 6.596,
+    "size_mb": 1024,
+    "speed_mbps": 155.25,
+    "extra": ""
+  },
+  {
+    "experiment": 25,
+    "name": "confidence-1gb-run1",
+    "tool": "scp",
+    "file": "1GB",
+    "seconds": 44.158,
+    "size_mb": 1024,
+    "speed_mbps": 23.19,
+    "extra": ""
+  },
+  {
+    "experiment": 26,
+    "name": "confidence-1gb-run2",
+    "tool": "scp",
+    "file": "1GB",
+    "seconds": 42.484,
+    "size_mb": 1024,
+    "speed_mbps": 24.1,
+    "extra": ""
+  },
+  {
+    "experiment": 27,
+    "name": "confidence-1gb-run3",
+    "tool": "scp",
+    "file": "1GB",
+    "seconds": 43.567,
+    "size_mb": 1024,
+    "speed_mbps": 23.5,
+    "extra": ""
+  },
+  {
+    "experiment": 28,
+    "name": "confidence-1gb-run1",
+    "tool": "rsync",
+    "file": "1GB",
+    "seconds": 44.122,
+    "size_mb": 1024,
+    "speed_mbps": 23.21,
+    "extra": ""
+  },
+  {
+    "experiment": 29,
+    "name": "confidence-1gb-run2",
+    "tool": "rsync",
+    "file": "1GB",
+    "seconds": 42.169,
+    "size_mb": 1024,
+    "speed_mbps": 24.28,
+    "extra": ""
+  },
+  {
+    "experiment": 30,
+    "name": "confidence-1gb-run3",
+    "tool": "rsync",
+    "file": "1GB",
+    "seconds": 42.15,
+    "size_mb": 1024,
+    "speed_mbps": 24.29,
+    "extra": ""
+  },
+  {
+    "experiment": 31,
+    "name": "confidence-1gb-run1",
+    "tool": "tar-ssh",
+    "file": "1GB",
+    "seconds": 41.413,
+    "size_mb": 1024,
+    "speed_mbps": 24.73,
+    "extra": ""
+  },
+  {
+    "experiment": 32,
+    "name": "confidence-1gb-run2",
+    "tool": "tar-ssh",
+    "file": "1GB",
+    "seconds": 42.549,
+    "size_mb": 1024,
+    "speed_mbps": 24.07,
+    "extra": ""
+  },
+  {
+    "experiment": 33,
+    "name": "confidence-1gb-run3",
+    "tool": "tar-ssh",
+    "file": "1GB",
+    "seconds": 42.518,
+    "size_mb": 1024,
+    "speed_mbps": 24.08,
+    "extra": ""
+  }
+]
