@@ -1,0 +1,272 @@
+[
+  {
+    "experiment": 1,
+    "scenario": "send-100mb-dev",
+    "rep": 1,
+    "seconds": 2.137,
+    "size_mb": 100.0,
+    "speed_mbps": 46.8,
+    "notes": ""
+  },
+  {
+    "experiment": 2,
+    "scenario": "send-100mb-dev",
+    "rep": 2,
+    "seconds": 3.413,
+    "size_mb": 100.0,
+    "speed_mbps": 29.3,
+    "notes": ""
+  },
+  {
+    "experiment": 3,
+    "scenario": "send-100mb-dev",
+    "rep": 3,
+    "seconds": 2.057,
+    "size_mb": 100.0,
+    "speed_mbps": 48.62,
+    "notes": ""
+  },
+  {
+    "experiment": 4,
+    "scenario": "send-100mb-wan",
+    "rep": 1,
+    "seconds": 1.976,
+    "size_mb": 100.0,
+    "speed_mbps": 50.61,
+    "notes": ""
+  },
+  {
+    "experiment": 5,
+    "scenario": "send-100mb-wan",
+    "rep": 2,
+    "seconds": 2.658,
+    "size_mb": 100.0,
+    "speed_mbps": 37.62,
+    "notes": ""
+  },
+  {
+    "experiment": 6,
+    "scenario": "send-100mb-wan",
+    "rep": 3,
+    "seconds": 3.695,
+    "size_mb": 100.0,
+    "speed_mbps": 27.06,
+    "notes": ""
+  },
+  {
+    "experiment": 7,
+    "scenario": "send-500mb-bulk",
+    "rep": 1,
+    "seconds": 9.112,
+    "size_mb": 500.0,
+    "speed_mbps": 54.87,
+    "notes": ""
+  },
+  {
+    "experiment": 8,
+    "scenario": "send-500mb-bulk",
+    "rep": 2,
+    "seconds": 9.922,
+    "size_mb": 500.0,
+    "speed_mbps": 50.39,
+    "notes": ""
+  },
+  {
+    "experiment": 9,
+    "scenario": "send-500mb-bulk",
+    "rep": 3,
+    "seconds": 8.494,
+    "size_mb": 500.0,
+    "speed_mbps": 58.87,
+    "notes": ""
+  },
+  {
+    "experiment": 10,
+    "scenario": "send-500mb-safe",
+    "rep": 1,
+    "seconds": 3.126,
+    "size_mb": 500.0,
+    "speed_mbps": 159.96,
+    "notes": ""
+  },
+  {
+    "experiment": 11,
+    "scenario": "send-500mb-safe",
+    "rep": 2,
+    "seconds": 3.808,
+    "size_mb": 500.0,
+    "speed_mbps": 131.3,
+    "notes": ""
+  },
+  {
+    "experiment": 12,
+    "scenario": "send-500mb-safe",
+    "rep": 3,
+    "seconds": 3.815,
+    "size_mb": 500.0,
+    "speed_mbps": 131.06,
+    "notes": ""
+  },
+  {
+    "experiment": 13,
+    "scenario": "send-1gb-compress",
+    "rep": 1,
+    "seconds": 21.769,
+    "size_mb": 1024.0,
+    "speed_mbps": 47.04,
+    "notes": ""
+  },
+  {
+    "experiment": 14,
+    "scenario": "send-1gb-compress",
+    "rep": 2,
+    "seconds": 21.953,
+    "size_mb": 1024.0,
+    "speed_mbps": 46.64,
+    "notes": ""
+  },
+  {
+    "experiment": 15,
+    "scenario": "send-1gb-compress",
+    "rep": 3,
+    "seconds": 21.035,
+    "size_mb": 1024.0,
+    "speed_mbps": 48.68,
+    "notes": ""
+  },
+  {
+    "experiment": 16,
+    "scenario": "dir-600-dev",
+    "rep": 1,
+    "seconds": 2.958,
+    "size_mb": 117.0,
+    "speed_mbps": 39.55,
+    "notes": ""
+  },
+  {
+    "experiment": 17,
+    "scenario": "dir-600-dev",
+    "rep": 2,
+    "seconds": 31.509,
+    "size_mb": 117.0,
+    "speed_mbps": 3.71,
+    "notes": ""
+  },
+  {
+    "experiment": 18,
+    "scenario": "dir-600-dev",
+    "rep": 3,
+    "seconds": 31.472,
+    "size_mb": 117.0,
+    "speed_mbps": 3.72,
+    "notes": ""
+  },
+  {
+    "experiment": 19,
+    "scenario": "dir-600-wan",
+    "rep": 1,
+    "seconds": 2.957,
+    "size_mb": 117.0,
+    "speed_mbps": 39.57,
+    "notes": ""
+  },
+  {
+    "experiment": 20,
+    "scenario": "dir-600-wan",
+    "rep": 2,
+    "seconds": 31.636,
+    "size_mb": 117.0,
+    "speed_mbps": 3.7,
+    "notes": ""
+  },
+  {
+    "experiment": 21,
+    "scenario": "dir-600-wan",
+    "rep": 3,
+    "seconds": 31.777,
+    "size_mb": 117.0,
+    "speed_mbps": 3.68,
+    "notes": ""
+  },
+  {
+    "experiment": 22,
+    "scenario": "delta-500mb-10pct",
+    "rep": 1,
+    "seconds": 5.035,
+    "size_mb": 500.0,
+    "speed_mbps": 99.3,
+    "notes": ""
+  },
+  {
+    "experiment": 23,
+    "scenario": "delta-500mb-10pct",
+    "rep": 2,
+    "seconds": 5.278,
+    "size_mb": 500.0,
+    "speed_mbps": 94.73,
+    "notes": ""
+  },
+  {
+    "experiment": 24,
+    "scenario": "delta-500mb-10pct",
+    "rep": 3,
+    "seconds": 5.843,
+    "size_mb": 500.0,
+    "speed_mbps": 85.57,
+    "notes": ""
+  },
+  {
+    "experiment": 25,
+    "scenario": "pull-100mb-dev",
+    "rep": 1,
+    "seconds": 1.965,
+    "size_mb": 100.0,
+    "speed_mbps": 50.88,
+    "notes": ""
+  },
+  {
+    "experiment": 26,
+    "scenario": "pull-100mb-dev",
+    "rep": 2,
+    "seconds": 0.224,
+    "size_mb": 100.0,
+    "speed_mbps": 447.4,
+    "notes": ""
+  },
+  {
+    "experiment": 27,
+    "scenario": "pull-100mb-dev",
+    "rep": 3,
+    "seconds": 0.227,
+    "size_mb": 100.0,
+    "speed_mbps": 440.19,
+    "notes": ""
+  },
+  {
+    "experiment": 28,
+    "scenario": "delta-dir-600",
+    "rep": 1,
+    "seconds": 79.316,
+    "size_mb": 117.0,
+    "speed_mbps": 1.48,
+    "notes": ""
+  },
+  {
+    "experiment": 29,
+    "scenario": "delta-dir-600",
+    "rep": 2,
+    "seconds": 79.87,
+    "size_mb": 117.0,
+    "speed_mbps": 1.46,
+    "notes": ""
+  },
+  {
+    "experiment": 30,
+    "scenario": "delta-dir-600",
+    "rep": 3,
+    "seconds": 80.505,
+    "size_mb": 117.0,
+    "speed_mbps": 1.45,
+    "notes": ""
+  }
+]

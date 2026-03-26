@@ -12,68 +12,74 @@ use bytehaul_proto::congestion::CongestionMode;
 use bytehaul_proto::filter::FileFilter;
 
 use crate::output::{JsonEvent, Reporter};
+use crate::profiles::{apply_transfer_profile, TransferProfile};
 
 #[derive(Args)]
 pub struct SendArgs {
     /// Local file to send
+    #[arg(help_heading = "Common")]
     pub source: String,
 
     /// Remote destination(s). Multiple destinations for fan-out:
     /// bytehaul send ./data host1:/path host2:/path host3:/path
-    #[arg(num_args = 1..)]
+    #[arg(num_args = 1.., help_heading = "Common")]
     pub destinations: Vec<String>,
 
     /// Resume a previous transfer
-    #[arg(long)]
+    #[arg(long, help_heading = "Common")]
     pub resume: bool,
 
-    /// Use aggressive congestion control (saturate link)
-    #[arg(long)]
-    pub aggressive: bool,
+    /// Friendly preset for common transfer patterns
+    #[arg(long, value_enum, default_value_t = TransferProfile::Dev, help_heading = "Common")]
+    pub profile: TransferProfile,
 
-    /// Maximum transfer rate (e.g., 500mbps, 1gbps)
-    #[arg(long)]
-    pub max_rate: Option<String>,
+    /// Send directory recursively
+    #[arg(short = 'r', long, help_heading = "Common")]
+    pub recursive: bool,
+
+    /// Connect to a running daemon instead of SSH bootstrap
+    #[arg(long, help_heading = "Common")]
+    pub daemon: Option<String>,
+
+    /// Show what would be transferred without sending
+    #[arg(long, help_heading = "Common")]
+    pub dry_run: bool,
 
     /// Block size in MB
-    #[arg(long, default_value = "16")]
+    #[arg(long, default_value = "16", help_heading = "Advanced")]
     pub block_size: u32,
 
     /// Number of parallel streams
-    #[arg(long, default_value = "16")]
+    #[arg(long, default_value = "16", help_heading = "Advanced")]
     pub parallel: usize,
 
-    /// Connect to a running daemon instead of SSH bootstrap
-    #[arg(long)]
-    pub daemon: Option<String>,
+    /// Use aggressive congestion control (saturate link)
+    #[arg(long, help_heading = "Advanced")]
+    pub aggressive: bool,
 
-    /// Send directory recursively
-    #[arg(short = 'r', long)]
-    pub recursive: bool,
-
-    /// Delta transfer: only send changed blocks
-    #[arg(long)]
-    pub delta: bool,
-
-    /// Show what would be transferred without sending
-    #[arg(long)]
-    pub dry_run: bool,
+    /// Maximum transfer rate (e.g., 500mbps, 1gbps)
+    #[arg(long, help_heading = "Advanced")]
+    pub max_rate: Option<String>,
 
     /// Include only files matching these glob patterns (comma-separated)
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', help_heading = "Advanced")]
     pub include: Vec<String>,
 
     /// Exclude files matching these glob patterns (comma-separated)
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', help_heading = "Advanced")]
     pub exclude: Vec<String>,
 
     /// Compress chunks with zstd before sending
-    #[arg(long)]
+    #[arg(long, help_heading = "Advanced")]
     pub compress: bool,
 
     /// Zstd compression level (1-22, default 3)
-    #[arg(long, default_value = "3")]
+    #[arg(long, default_value = "3", help_heading = "Advanced")]
     pub compress_level: i32,
+
+    /// Delta transfer: only send changed blocks
+    #[arg(long, help_heading = "Experimental")]
+    pub delta: bool,
 }
 
 pub async fn run(args: SendArgs, json: bool) -> Result<()> {
@@ -117,14 +123,21 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
 
     // Dry run: show what would be transferred
     if args.dry_run {
-        let block_count = (file_size + (args.block_size as u64 * 1024 * 1024) - 1)
-            / (args.block_size as u64 * 1024 * 1024);
+        let (_, tuning) = apply_transfer_profile(
+            TransferConfig::builder(),
+            args.profile,
+            args.block_size,
+            args.parallel,
+            args.aggressive,
+        );
+        let block_count = (file_size + (tuning.block_size_mb as u64 * 1024 * 1024) - 1)
+            / (tuning.block_size_mb as u64 * 1024 * 1024);
 
         if reporter.is_json() {
             reporter.emit(&JsonEvent::DryRun {
                 files: file_count,
                 total_bytes: file_size,
-                block_size: args.block_size,
+                block_size: tuning.block_size_mb,
                 blocks: block_count,
             });
             return Ok(());
@@ -147,12 +160,16 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         }
         eprintln!("  Source:      {}", source.display());
         eprintln!("  Destination: {}", args.destinations[0]);
-        eprintln!("  Block size:  {} MB", args.block_size);
+        eprintln!("  Profile:     {}", args.profile.label());
+        eprintln!("  Block size:  {} MB", tuning.block_size_mb);
         eprintln!("  Blocks:      {}", block_count);
-        eprintln!("  Streams:     {}", args.parallel);
+        eprintln!("  Streams:     {}", tuning.parallel_streams);
         eprintln!(
             "  Congestion:  {}",
-            if args.aggressive { "aggressive" } else { "fair" }
+            match tuning.congestion {
+                CongestionMode::Aggressive => "aggressive",
+                CongestionMode::Fair => "fair",
+            }
         );
         eprintln!(
             "  Delta:       {}",
@@ -182,19 +199,18 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         ));
 
         let mut handles = Vec::new();
-        for (i, dest) in args.destinations.iter().enumerate() {
+        for dest in &args.destinations {
             let dest = dest.clone();
             let source = source.clone();
             let is_dir = is_dir;
-            let config = TransferConfig::builder()
-                .resume(args.resume)
-                .block_size_mb(args.block_size)
-                .max_parallel_streams(args.parallel)
-                .congestion(if args.aggressive {
-                    CongestionMode::Aggressive
-                } else {
-                    CongestionMode::Fair
-                })
+            let (config, _) = apply_transfer_profile(
+                TransferConfig::builder().resume(args.resume),
+                args.profile,
+                args.block_size,
+                args.parallel,
+                args.aggressive,
+            );
+            let config = config
                 .delta(args.delta)
                 .compress(args.compress)
                 .compress_level(args.compress_level)
@@ -262,15 +278,13 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     };
 
     // Build config
-    let mut config = TransferConfig::builder()
-        .resume(args.resume)
-        .block_size_mb(args.block_size)
-        .max_parallel_streams(args.parallel)
-        .congestion(if args.aggressive {
-            CongestionMode::Aggressive
-        } else {
-            CongestionMode::Fair
-        });
+    let (mut config, tuning) = apply_transfer_profile(
+        TransferConfig::builder().resume(args.resume),
+        args.profile,
+        args.block_size,
+        args.parallel,
+        args.aggressive,
+    );
 
     if let Some(ref rate) = args.max_rate {
         let mbps = parse_rate(rate)?;
@@ -301,6 +315,7 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     let client = client.with_config(config);
 
     let file_size_display = humansize::format_size(file_size, humansize::BINARY);
+    reporter.info(&tuning.summary_line());
     reporter.info(&format!(
         "  Sending: {} ({})",
         style(source.display()).bold(),
@@ -347,6 +362,7 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     };
 
     let wall_start = Instant::now();
+    reporter.info("  State: connected, planned, transferring, waiting for remote verification...");
 
     // Wire up progress reporting.
     if let Some(cb) = reporter.progress_callback() {

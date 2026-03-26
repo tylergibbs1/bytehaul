@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 
 # ═══════════════════════════════════════════════════════════════
 # ByteHaul vs What ML Engineers Actually Use
@@ -143,69 +143,69 @@ echo ""
 log "═══ 500MB model checkpoint (FP32 weights = incompressible) ═══"
 
 # ByteHaul (smart mode equivalent)
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port 7700 --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul send --daemon '$IPB:7700' /tmp/model.pt /b >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port 7700 --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul send --daemon '$IPB:7700' /tmp/model.pt /b >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\"")
 record $N "checkpoint-500mb" "bytehaul" "500MB" "$T" 500
 
 # rsync -avz (THE default for most teams)
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rsync -avz -e \"ssh \$K\" /tmp/model.pt ec2-user@$IPB:/tmp/rv/ >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rsync -avz -e \"ssh \$K\" /tmp/model.pt ec2-user@$IPB:/tmp/rv/ >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "checkpoint-500mb" "rsync-avz" "500MB" "$T" 500
 
 # scp -C (scp with compression)
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); scp -C -q \$K /tmp/model.pt ec2-user@$IPB:/tmp/rv/b; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); scp -C -q \$K /tmp/model.pt ec2-user@$IPB:/tmp/rv/b; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "checkpoint-500mb" "scp-C" "500MB" "$T" 500
 
 # tar | ssh (no compression, fastest TCP pipe)
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); tar cf - -C /tmp model.pt | ssh \$K ec2-user@$IPB 'tar xf - -C /tmp/rv/'; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); tar cf - -C /tmp model.pt | ssh \$K ec2-user@$IPB 'tar xf - -C /tmp/rv/'; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "checkpoint-500mb" "tar-ssh" "500MB" "$T" 500
 
 # tar | pigz | ssh (parallel-compressed pipe)
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); tar cf - -C /tmp model.pt | pigz -1 | ssh \$K ec2-user@$IPB 'pigz -d | tar xf - -C /tmp/rv/'; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); tar cf - -C /tmp model.pt | pigz -1 | ssh \$K ec2-user@$IPB 'pigz -d | tar xf - -C /tmp/rv/'; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "checkpoint-500mb" "tar-pigz-ssh" "500MB" "$T" 500
 
 # rclone over SFTP
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rclone copy /tmp/model.pt gpu:/tmp/rv/ 2>/dev/null; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rclone copy /tmp/model.pt gpu:/tmp/rv/ 2>/dev/null; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "checkpoint-500mb" "rclone-sftp" "500MB" "$T" 500
 
 # ═══ SCENARIO 2: 600 dataset shards ═══
 log "═══ 600 dataset shards (many small files) ═══"
 
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port 7700 --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul send -r --daemon '$IPB:7700' /tmp/shards /b >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port 7700 --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul send -r --daemon '$IPB:7700' /tmp/shards /b >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\"")
 record $N "shards-600" "bytehaul" "600x200KB" "$T" 117
 
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rsync -avz -e \"ssh \$K\" /tmp/shards ec2-user@$IPB:/tmp/rv/ >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rsync -avz -e \"ssh \$K\" /tmp/shards ec2-user@$IPB:/tmp/rv/ >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "shards-600" "rsync-avz" "600x200KB" "$T" 117
 
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); tar cf - -C /tmp shards | ssh \$K ec2-user@$IPB 'tar xf - -C /tmp/rv/'; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); tar cf - -C /tmp shards | ssh \$K ec2-user@$IPB 'tar xf - -C /tmp/rv/'; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "shards-600" "tar-ssh" "600x200KB" "$T" 117
 
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rclone copy /tmp/shards gpu:/tmp/rv/shards 2>/dev/null; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rclone copy /tmp/shards gpu:/tmp/rv/shards 2>/dev/null; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "shards-600" "rclone-sftp" "600x200KB" "$T" 117
 
 # ═══ SCENARIO 3: 5GB large model ═══
 log "═══ 5GB large model ═══"
 
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port 7700 --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul send --daemon '$IPB:7700' /tmp/big_model.pt /b >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port 7700 --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul send --daemon '$IPB:7700' /tmp/big_model.pt /b >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\"")
 record $N "large-model-5gb" "bytehaul" "5GB" "$T" 5120
 
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rsync -av -e \"ssh \$K\" /tmp/big_model.pt ec2-user@$IPB:/tmp/rv/ >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rsync -av -e \"ssh \$K\" /tmp/big_model.pt ec2-user@$IPB:/tmp/rv/ >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "large-model-5gb" "rsync-av" "5GB" "$T" 5120
 
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); tar cf - -C /tmp big_model.pt | ssh \$K ec2-user@$IPB 'tar xf - -C /tmp/rv/'; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); tar cf - -C /tmp big_model.pt | ssh \$K ec2-user@$IPB 'tar xf - -C /tmp/rv/'; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "large-model-5gb" "tar-ssh" "5GB" "$T" 5120
 
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); scp -q \$K /tmp/big_model.pt ec2-user@$IPB:/tmp/rv/b; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); scp -q \$K /tmp/big_model.pt ec2-user@$IPB:/tmp/rv/b; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "large-model-5gb" "scp" "5GB" "$T" 5120
 
 # ═══ SCENARIO 4: Compressible training logs ═══
 log "═══ Compressible training logs (~40MB text) ═══"
 
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port 7700 --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul send -r --compress --daemon '$IPB:7700' /tmp/logs /b >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port 7700 --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul send -r --compress --daemon '$IPB:7700' /tmp/logs /b >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\"")
 record $N "logs-compressed" "bytehaul-zstd" "200x-logs" "$T" 40
 
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rsync -avz -e \"ssh \$K\" /tmp/logs ec2-user@$IPB:/tmp/rv/ >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); rsync -avz -e \"ssh \$K\" /tmp/logs ec2-user@$IPB:/tmp/rv/ >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "logs-compressed" "rsync-avz" "200x-logs" "$T" 40
 
-nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); tar cf - -C /tmp logs | pigz -1 | ssh \$K ec2-user@$IPB 'pigz -d | tar xf - -C /tmp/rv/'; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"") || T=-1
+nx; T=$(R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); tar cf - -C /tmp logs | pigz -1 | ssh \$K ec2-user@$IPB 'pigz -d | tar xf - -C /tmp/rv/'; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\"")
 record $N "logs-compressed" "tar-pigz-ssh" "200x-logs" "$T" 40
 
 echo ""

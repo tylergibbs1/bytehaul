@@ -14,8 +14,8 @@ use tracing::{debug, error, info, warn};
 use crate::adaptive;
 use crate::chunking::{ChunkPlan, ChunkReader, ChunkScheduler, ChunkWriter};
 use crate::compress;
-use crate::congestion::BandwidthLimiter;
-use crate::fec::FecEncoder;
+use crate::congestion::{BandwidthLimiter, ByteHaulCongestion, CongestionMode};
+use crate::fec::{AdaptiveFecController, FecConfig, FecDecoder, FecEncoder};
 use crate::manifest::{FileEntry, TransferManifest};
 use crate::resume::{StateManager, TransferState};
 use crate::transport::QuicConnection;
@@ -205,6 +205,305 @@ impl Default for EngineConfig {
     }
 }
 
+fn finish_control_stream_shared(
+    ctrl_send: &mut quinn::SendStream,
+    context: &'static str,
+) -> Result<()> {
+    ctrl_send
+        .finish()
+        .map_err(|e| EngineError::Protocol(format!("{context}: {e}")))
+}
+
+async fn send_final_transfer_complete_shared(
+    ctrl_send: &mut quinn::SendStream,
+    file_blake3: [u8; 32],
+    finish_context: &'static str,
+) -> Result<()> {
+    wire::write_control_message(
+        ctrl_send,
+        &ControlMessage::TransferComplete { file_blake3 },
+    )
+    .await?;
+    finish_control_stream_shared(ctrl_send, finish_context)
+}
+
+async fn prepare_destination_file_shared(path: &Path, size: u64) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    // Preserve existing bytes until transfer negotiation completes. Delta
+    // and resume both rely on the current destination contents remaining
+    // available during setup.
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .await?;
+    file.set_len(size).await?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct RuntimeAdaptiveState {
+    cc: ByteHaulCongestion,
+    fec: AdaptiveFecController,
+    current_parallel: usize,
+    current_fec_group: usize,
+    last_sent_bytes: u64,
+    last_lost_bytes: u64,
+    last_sample_at: std::time::Instant,
+    baseline_rtt: Option<std::time::Duration>,
+    block_size: u64,
+}
+
+impl RuntimeAdaptiveState {
+    fn new(config: &EngineConfig) -> Self {
+        Self {
+            cc: ByteHaulCongestion::new(CongestionMode::Aggressive),
+            fec: AdaptiveFecController::new(),
+            current_parallel: config.max_parallel_streams.max(8),
+            current_fec_group: config.fec_group_size,
+            last_sent_bytes: 0,
+            last_lost_bytes: 0,
+            last_sample_at: std::time::Instant::now(),
+            baseline_rtt: None,
+            block_size: config.block_size as u64,
+        }
+    }
+
+    fn current_parallel(&self) -> usize {
+        self.current_parallel
+    }
+
+    fn maybe_refresh(&mut self, conn: &QuicConnection, configured_parallel: usize) {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_sample_at);
+        if elapsed < std::time::Duration::from_millis(750) {
+            return;
+        }
+
+        let stats = conn.inner().stats();
+        let sent_bytes = stats.udp_tx.bytes;
+        let lost_bytes = stats.path.lost_bytes;
+        let delta_sent = sent_bytes.saturating_sub(self.last_sent_bytes);
+        let delta_lost = lost_bytes.saturating_sub(self.last_lost_bytes);
+        let rtt = stats.path.rtt;
+
+        self.last_sent_bytes = sent_bytes;
+        self.last_lost_bytes = lost_bytes;
+        self.last_sample_at = now;
+
+        if self.baseline_rtt.is_none() && rtt > std::time::Duration::ZERO {
+            self.baseline_rtt = Some(rtt);
+        }
+        let baseline_rtt = self.baseline_rtt.unwrap_or(rtt);
+        let rtt_inflation = if baseline_rtt > std::time::Duration::ZERO {
+            (rtt.as_secs_f64() / baseline_rtt.as_secs_f64()).max(1.0)
+        } else {
+            1.0
+        };
+
+        let sent_packets = (delta_sent / 1200).max(1);
+        let lost_packets = delta_lost / 1200;
+        let burst_losses = if delta_lost == 0 {
+            0
+        } else {
+            (delta_lost / self.block_size.max(1)).max(1)
+        };
+        let loss_rate = delta_lost as f64 / delta_sent.max(1) as f64;
+        let loss_class = self.cc.classify_loss(loss_rate, burst_losses, rtt);
+
+        let acked_bytes = delta_sent.saturating_sub(delta_lost);
+        if acked_bytes > 0 {
+            self.cc.on_ack(acked_bytes, rtt);
+        }
+        if delta_lost > 0 {
+            self.cc.on_loss_event(delta_lost, loss_class);
+        }
+
+        let mut profile = adaptive::profile_from_quinn_stats(
+            rtt,
+            lost_packets,
+            sent_packets,
+            delta_sent,
+            elapsed.max(std::time::Duration::from_millis(1)),
+        );
+        profile.burst_ratio = if lost_packets > 0 {
+            (burst_losses as f64 / lost_packets.max(1) as f64).min(1.0)
+        } else {
+            0.0
+        };
+        profile.rtt_inflation = rtt_inflation;
+        profile.loss_class = loss_class;
+
+        let settings = adaptive::compute_adaptive_settings(&profile);
+        let next_parallel = settings.parallel_streams.clamp(4, configured_parallel.max(4));
+        let next_fec_group = self.fec.update(crate::fec::FecPathSignals {
+            loss_rate: profile.loss_rate,
+            burst_ratio: profile.burst_ratio,
+            rtt_inflation: profile.rtt_inflation,
+            retransmission_ratio: profile.loss_rate,
+        });
+
+        if next_parallel != self.current_parallel || next_fec_group != self.current_fec_group {
+            info!(
+                parallel = next_parallel,
+                fec_group = next_fec_group,
+                ?loss_class,
+                loss_rate = format_args!("{:.3}", profile.loss_rate),
+                rtt_ms = format_args!("{:.1}", rtt.as_secs_f64() * 1000.0),
+                "adaptive runtime update"
+            );
+        }
+
+        self.current_parallel = next_parallel;
+        self.current_fec_group = next_fec_group;
+    }
+
+    fn current_fec_group(&self) -> usize {
+        self.current_fec_group
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingFecParity {
+    chunk_indices: Vec<u64>,
+    parity: Vec<u8>,
+}
+
+async fn read_manifest_chunk_data(
+    manifest: &TransferManifest,
+    chunk_idx: u64,
+) -> Result<Vec<u8>> {
+    let (file_idx, local_offset) = manifest
+        .file_and_offset_for_block(chunk_idx)
+        .ok_or_else(|| EngineError::Protocol(format!("invalid manifest chunk index {chunk_idx}")))?;
+    let file_size = manifest.files[file_idx].size;
+    let remaining = file_size.saturating_sub(local_offset);
+    let chunk_size = remaining.min(manifest.block_size as u64) as u32;
+    ChunkReader::read_chunk(
+        &manifest.files[file_idx].source_path,
+        local_offset,
+        chunk_size,
+    )
+    .await
+    .map_err(EngineError::from)
+}
+
+async fn build_manifest_fec_messages(
+    manifest: &TransferManifest,
+    batch: &[u64],
+    group_size: usize,
+) -> Result<Vec<ControlMessage>> {
+    if group_size < 2 || batch.len() < 2 {
+        return Ok(Vec::new());
+    }
+
+    let mut messages = Vec::new();
+    for group in batch.chunks(group_size) {
+        if group.len() < 2 {
+            continue;
+        }
+
+        let mut encoder = FecEncoder::new(FecConfig::with_group_size(group.len()));
+        let mut parity = None;
+        for &chunk_idx in group {
+            let data = read_manifest_chunk_data(manifest, chunk_idx).await?;
+            if let Some(generated) = encoder.feed(&data) {
+                parity = Some(generated);
+            }
+        }
+
+        if parity.is_none() {
+            parity = encoder.flush();
+        }
+
+        if let Some(parity) = parity {
+            messages.push(ControlMessage::FecParity {
+                chunk_indices: group.to_vec(),
+                parity,
+            });
+        }
+    }
+
+    Ok(messages)
+}
+
+async fn recover_manifest_fec_chunks(
+    manifest: &TransferManifest,
+    dest_paths: &[PathBuf],
+    state: &mut TransferState,
+    parity_groups: &[PendingFecParity],
+) -> Result<u64> {
+    if parity_groups.is_empty() {
+        return Ok(0);
+    }
+
+    let mut recovered = 0;
+    let mut progress = true;
+
+    while progress {
+        progress = false;
+
+        for parity_group in parity_groups {
+            let missing: Vec<u64> = parity_group
+                .chunk_indices
+                .iter()
+                .copied()
+                .filter(|idx| !state.blocks_received.contains(idx))
+                .collect();
+
+            if missing.len() != 1 {
+                continue;
+            }
+
+            let mut decoder = FecDecoder::new(parity_group.chunk_indices.len());
+            for (position, &chunk_idx) in parity_group.chunk_indices.iter().enumerate() {
+                if chunk_idx == missing[0] {
+                    continue;
+                }
+
+                let (file_idx, local_offset) = manifest
+                    .file_and_offset_for_block(chunk_idx)
+                    .ok_or_else(|| {
+                        EngineError::Protocol(format!(
+                            "invalid manifest chunk index {chunk_idx} during FEC recovery"
+                        ))
+                    })?;
+                let file_size = manifest.files[file_idx].size;
+                let remaining = file_size.saturating_sub(local_offset);
+                let chunk_size = remaining.min(manifest.block_size as u64) as u32;
+                let data = ChunkReader::read_chunk(&dest_paths[file_idx], local_offset, chunk_size).await?;
+                decoder.receive_chunk(position, data);
+            }
+
+            decoder.receive_parity(parity_group.parity.clone());
+            let Some((missing_position, recovered_bytes)) = decoder.try_recover() else {
+                continue;
+            };
+            let missing_idx = parity_group.chunk_indices[missing_position];
+            let (file_idx, local_offset) = manifest
+                .file_and_offset_for_block(missing_idx)
+                .ok_or_else(|| {
+                    EngineError::Protocol(format!(
+                        "invalid recovered manifest chunk index {missing_idx}"
+                    ))
+                })?;
+
+            ChunkWriter::write_chunk(&dest_paths[file_idx], local_offset, &recovered_bytes).await?;
+            state.mark_received(missing_idx);
+            recovered += 1;
+            progress = true;
+
+            info!(chunk_index = missing_idx, "recovered chunk from FEC parity");
+        }
+    }
+
+    Ok(recovered)
+}
+
 // ---------------------------------------------------------------------------
 // Sender
 // ---------------------------------------------------------------------------
@@ -251,6 +550,28 @@ impl Sender {
         }
     }
 
+    fn finish_control_stream(
+        ctrl_send: &mut quinn::SendStream,
+        context: &'static str,
+    ) -> Result<()> {
+        ctrl_send
+            .finish()
+            .map_err(|e| EngineError::Protocol(format!("{context}: {e}")))
+    }
+
+    async fn send_final_transfer_complete(
+        ctrl_send: &mut quinn::SendStream,
+        file_blake3: [u8; 32],
+        finish_context: &'static str,
+    ) -> Result<()> {
+        wire::write_control_message(
+            ctrl_send,
+            &ControlMessage::TransferComplete { file_blake3 },
+        )
+        .await?;
+        Self::finish_control_stream(ctrl_send, finish_context)
+    }
+
     /// Send a single file over the given QUIC connection.
     pub async fn send_file(
         &self,
@@ -258,25 +579,27 @@ impl Sender {
         local_path: &Path,
         remote_dest: &str,
     ) -> Result<()> {
-        let start = std::time::Instant::now();
-
-        // 1. Hash the file and build manifest
-        info!("Hashing file: {}", local_path.display());
-        let file_hash = verify::hash_file(local_path).await?;
-
         let file_size = tokio::fs::metadata(local_path).await?.len();
-
         let mut manifest = TransferManifest::new(
             vec![FileEntry {
                 source_path: local_path.to_path_buf(),
                 dest_path: PathBuf::from(remote_dest),
                 size: file_size,
-                blake3_hash: file_hash,
+                blake3_hash: verify::hash_file(local_path).await?,
                 relative_path: None,
             }],
             self.config.block_size,
         )?;
         manifest.compressed = self.config.compress;
+
+        if self.config.delta_enabled || self.config.adaptive || self.config.fec_group_size > 0 {
+            info!(
+                "Using manifest transfer path for single-file send"
+            );
+            return self.send_transfer(conn, &manifest).await;
+        }
+
+        let start = std::time::Instant::now();
 
         info!(
             "Transfer {}: {} bytes, {} blocks{}",
@@ -333,11 +656,10 @@ impl Sender {
 
         if scheduler.is_complete() {
             info!("All chunks already received, sending completion");
-            wire::write_control_message(
+            Self::send_final_transfer_complete(
                 &mut ctrl_send,
-                &ControlMessage::TransferComplete {
-                    file_blake3: manifest.manifest_hash(),
-                },
+                manifest.manifest_hash(),
+                "failed to finish sender control stream",
             )
             .await?;
             // Wait for receiver's confirmation before returning, so callers
@@ -351,7 +673,8 @@ impl Sender {
         }
 
         // 4. Send chunks in parallel batches
-        let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_streams));
+        let mut adaptive_state = RuntimeAdaptiveState::new(&self.config);
+        let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_streams.max(64)));
         let mut sent_count = already_received;
         let mut rate_limiter = BandwidthLimiter::new(self.config.max_bandwidth_bps);
 
@@ -360,10 +683,19 @@ impl Sender {
             verify::hex_to_hash(&manifest.transfer_id).unwrap_or([0u8; 32]);
 
         while !scheduler.is_complete() {
-            let batch = scheduler.next_batch(self.config.max_parallel_streams);
+            adaptive_state.maybe_refresh(conn, self.config.max_parallel_streams);
+            let batch_limit = adaptive_state.current_parallel();
+            let batch = scheduler.next_batch(batch_limit);
             if batch.is_empty() {
                 break;
             }
+
+            let fec_messages = build_manifest_fec_messages(
+                &manifest,
+                &batch,
+                adaptive_state.current_fec_group(),
+            )
+            .await?;
 
             let mut handles = Vec::new();
 
@@ -466,6 +798,17 @@ impl Sender {
                     }
                 }
             }
+
+            for msg in fec_messages {
+                wire::write_control_message(&mut ctrl_send, &msg).await?;
+            }
+        }
+
+        if adaptive_state.current_fec_group() > 0 {
+            info!(
+                fec_group = adaptive_state.current_fec_group(),
+                "adaptive fec selected a repair group size for this transfer"
+            );
         }
 
         // 5. Wait for receiver to confirm
@@ -491,15 +834,6 @@ impl Sender {
         }
 
         // 6. Send our own completion confirmation
-        wire::write_control_message(
-            &mut ctrl_send,
-            &ControlMessage::TransferComplete {
-                file_blake3: manifest.manifest_hash(),
-            },
-        )
-        .await
-        .ok(); // Best-effort: receiver may have already closed the connection
-
         let elapsed = start.elapsed();
         let speed_mbps = if elapsed.as_secs_f64() > 0.0 {
             (file_size as f64 / elapsed.as_secs_f64()) / (1024.0 * 1024.0)
@@ -640,9 +974,10 @@ impl Sender {
 
         if scheduler.is_complete() {
             let manifest_hash = manifest.manifest_hash();
-            wire::write_control_message(
+            Self::send_final_transfer_complete(
                 &mut ctrl_send,
-                &ControlMessage::TransferComplete { file_blake3: manifest_hash },
+                manifest_hash,
+                "failed to finish sender control stream",
             )
             .await?;
             // Wait for receiver confirmation before returning.
@@ -655,17 +990,27 @@ impl Sender {
         }
 
         // 5. Send chunks in parallel
-        let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_streams));
+        let mut adaptive_state = RuntimeAdaptiveState::new(&self.config);
+        let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_streams.max(64)));
         let mut sent_count = already_received;
         let mut rate_limiter = BandwidthLimiter::new(self.config.max_bandwidth_bps);
         let transfer_id_bytes =
             verify::hex_to_hash(&manifest.transfer_id).unwrap_or([0u8; 32]);
 
         while !scheduler.is_complete() {
-            let batch = scheduler.next_batch(self.config.max_parallel_streams);
+            adaptive_state.maybe_refresh(conn, self.config.max_parallel_streams);
+            let batch_limit = adaptive_state.current_parallel();
+            let batch = scheduler.next_batch(batch_limit);
             if batch.is_empty() {
                 break;
             }
+
+            let fec_messages = build_manifest_fec_messages(
+                &manifest,
+                &batch,
+                adaptive_state.current_fec_group(),
+            )
+            .await?;
 
             let mut handles = Vec::new();
 
@@ -758,6 +1103,17 @@ impl Sender {
                     }
                 }
             }
+
+            for msg in fec_messages {
+                wire::write_control_message(&mut ctrl_send, &msg).await?;
+            }
+        }
+
+        if adaptive_state.current_fec_group() > 0 {
+            info!(
+                fec_group = adaptive_state.current_fec_group(),
+                "adaptive fec selected a repair group size for this transfer"
+            );
         }
 
         // 6. Wait for receiver confirmation
@@ -782,13 +1138,6 @@ impl Sender {
                 _ => {}
             }
         }
-
-        wire::write_control_message(
-            &mut ctrl_send,
-            &ControlMessage::TransferComplete { file_blake3: manifest_hash },
-        )
-        .await
-        .ok(); // Best-effort: receiver may have already closed the connection
 
         let elapsed = start.elapsed();
         info!(
@@ -916,9 +1265,10 @@ impl Sender {
 
         if scheduler.is_complete() {
             let manifest_hash = manifest.manifest_hash();
-            wire::write_control_message(
+            Self::send_final_transfer_complete(
                 ctrl_send,
-                &ControlMessage::TransferComplete { file_blake3: manifest_hash },
+                manifest_hash,
+                "failed to finish pull control stream",
             )
             .await?;
             Self::wait_for_completion_confirmation(
@@ -930,14 +1280,17 @@ impl Sender {
         }
 
         // Stream chunks in parallel — identical to send_transfer.
-        let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_streams));
+        let mut adaptive_state = RuntimeAdaptiveState::new(&self.config);
+        let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_streams.max(64)));
         let mut sent_count = already_received;
         let mut rate_limiter = BandwidthLimiter::new(self.config.max_bandwidth_bps);
         let transfer_id_bytes =
             verify::hex_to_hash(&manifest.transfer_id).unwrap_or([0u8; 32]);
 
         while !scheduler.is_complete() {
-            let batch = scheduler.next_batch(self.config.max_parallel_streams);
+            adaptive_state.maybe_refresh(conn, self.config.max_parallel_streams);
+            let batch_limit = adaptive_state.current_parallel();
+            let batch = scheduler.next_batch(batch_limit);
             if batch.is_empty() {
                 break;
             }
@@ -1034,6 +1387,13 @@ impl Sender {
             }
         }
 
+        if adaptive_state.current_fec_group() > 0 {
+            info!(
+                fec_group = adaptive_state.current_fec_group(),
+                "adaptive fec selected a repair group size for this transfer"
+            );
+        }
+
         // Wait for client confirmation.
         let manifest_hash = manifest.manifest_hash();
         loop {
@@ -1056,13 +1416,6 @@ impl Sender {
                 _ => {}
             }
         }
-
-        wire::write_control_message(
-            ctrl_send,
-            &ControlMessage::TransferComplete { file_blake3: manifest_hash },
-        )
-        .await
-        .ok(); // Best-effort: client may have already closed the connection
 
         let elapsed = start.elapsed();
         info!(
@@ -1215,17 +1568,7 @@ impl Receiver {
                 existing
             }
             None => {
-                // Create the destination file (pre-allocate)
-                let file = tokio::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(&dest_path)
-                    .await?;
-                if file_entry.size > 0 {
-                    file.set_len(file_entry.size).await?;
-                }
-                drop(file);
+                prepare_destination_file_shared(&dest_path, file_entry.size).await?;
 
                 TransferState::new(
                     manifest.transfer_id.clone(),
@@ -1352,20 +1695,12 @@ impl Receiver {
         }
 
         // 6. Send completion (use manifest_hash for consistency with send_file)
-        wire::write_control_message(
+        send_final_transfer_complete_shared(
             &mut ctrl_send,
-            &ControlMessage::TransferComplete {
-                file_blake3: manifest.manifest_hash(),
-            },
+            manifest.manifest_hash(),
+            "failed to finish receiver control stream",
         )
         .await?;
-
-        // Wait for sender's completion confirmation
-        match wire::read_control_message(&mut ctrl_recv).await {
-            Ok(ControlMessage::TransferComplete { .. }) => {}
-            Ok(_) => warn!("Expected TransferComplete from sender"),
-            Err(e) => debug!("Control stream closed before sender confirmation: {}", e),
-        }
 
         // 7. Clean up state file
         self.state_manager.delete(&manifest.transfer_id)?;
@@ -1547,20 +1882,8 @@ impl Receiver {
                 existing
             }
             None => {
-                // Create all destination directories and pre-allocate files
                 for (i, dest_path) in dest_paths.iter().enumerate() {
-                    if let Some(parent) = dest_path.parent() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
-                    let file = tokio::fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .open(dest_path)
-                        .await?;
-                    if manifest.files[i].size > 0 {
-                        file.set_len(manifest.files[i].size).await?;
-                    }
+                    prepare_destination_file_shared(dest_path, manifest.files[i].size).await?;
                 }
 
                 TransferState::new(
@@ -1590,6 +1913,7 @@ impl Receiver {
         // 5. Handle delta requests (if sender asks)
         // Use a short timeout: if no delta request arrives within 100ms,
         // the sender isn't using delta and we proceed to chunk receiving.
+        let mut parity_groups = Vec::new();
         loop {
             let msg = tokio::time::timeout(
                 std::time::Duration::from_millis(100),
@@ -1628,21 +1952,29 @@ impl Receiver {
                     }
                 }
                 Ok(other) => {
-                    // Not a delta message — this must be something else (e.g., the sender
-                    // started sending chunks). We need to handle it in the chunk loop.
-                    // For now, if it's a TransferComplete (all matched), handle it.
-                    if let ControlMessage::TransferComplete { file_blake3 } = other {
-                        let manifest_hash = manifest.manifest_hash();
-                        if file_blake3 == manifest_hash {
-                            info!("All blocks matched via delta, nothing to transfer");
-                            wire::write_control_message(
-                                &mut ctrl_send,
-                                &ControlMessage::TransferComplete { file_blake3: manifest_hash },
-                            )
-                            .await?;
-                            self.state_manager.delete(&manifest.transfer_id)?;
-                            return Ok(dest_paths);
+                    match other {
+                        ControlMessage::TransferComplete { file_blake3 } => {
+                            let manifest_hash = manifest.manifest_hash();
+                            if file_blake3 == manifest_hash {
+                                info!("All blocks matched via delta, nothing to transfer");
+                                send_final_transfer_complete_shared(
+                                    &mut ctrl_send,
+                                    manifest_hash,
+                                    "failed to finish receiver control stream",
+                                )
+                                .await?;
+                                self.state_manager.delete(&manifest.transfer_id)?;
+                                return Ok(dest_paths);
+                            }
                         }
+                        ControlMessage::FecParity { chunk_indices, parity } => {
+                            parity_groups.push(PendingFecParity {
+                                chunk_indices,
+                                parity,
+                            });
+                            continue;
+                        }
+                        _ => {}
                     }
                     break;
                 }
@@ -1651,12 +1983,14 @@ impl Receiver {
         }
 
         // 6. Receive chunks
+        let mut sender_reported_complete = false;
         if state.received_count() < total_chunks {
             let mut ack_batch = Vec::new();
             let mut set = JoinSet::new();
+            let expected_manifest_hash = manifest.manifest_hash();
 
             loop {
-                if state.received_count() >= total_chunks {
+                if state.received_count() >= total_chunks || sender_reported_complete {
                     while let Some(result) = set.join_next().await {
                         self.handle_chunk_result(result, &mut state, &mut ack_batch);
                     }
@@ -1664,6 +1998,50 @@ impl Receiver {
                 }
 
                 tokio::select! {
+                    control_msg = wire::read_control_message(&mut ctrl_recv) => {
+                        match control_msg? {
+                            ControlMessage::TransferComplete { file_blake3 } => {
+                                if file_blake3 != expected_manifest_hash {
+                                    return Err(EngineError::HashMismatch(
+                                        "manifest hash mismatch on sender side".into(),
+                                    ));
+                                }
+
+                                if !set.is_empty() {
+                                    return Err(EngineError::Protocol(
+                                        "sender reported completion while chunks were still in flight".into(),
+                                    ));
+                                }
+
+                                sender_reported_complete = true;
+                            }
+                            ControlMessage::FecParity { chunk_indices, parity } => {
+                                parity_groups.push(PendingFecParity {
+                                    chunk_indices,
+                                    parity,
+                                });
+                            }
+                            ControlMessage::Error { code, message } => {
+                                return Err(EngineError::RemoteError { code, message });
+                            }
+                            ControlMessage::Cancel => {
+                                return Err(EngineError::Protocol(
+                                    "sender canceled transfer while receiving chunks".into(),
+                                ));
+                            }
+                            ControlMessage::ProgressAck { .. }
+                            | ControlMessage::DeltaRequest { .. }
+                            | ControlMessage::DeltaSignatures { .. }
+                            | ControlMessage::DeltaNotAvailable { .. }
+                            | ControlMessage::ResumeState { .. }
+                            | ControlMessage::Manifest { .. }
+                            | ControlMessage::PullRequest { .. } => {
+                                return Err(EngineError::Protocol(
+                                    "unexpected control message while receiving chunks".into(),
+                                ));
+                            }
+                        }
+                    }
                     result = conn.accept_data_stream() => {
                         let (_send, mut recv) = result?;
                         let manifest_ref = manifest.clone();
@@ -1755,6 +2133,19 @@ impl Receiver {
             }
         }
 
+        if state.received_count() < total_chunks {
+            let recovered = recover_manifest_fec_chunks(
+                &manifest,
+                &dest_paths,
+                &mut state,
+                &parity_groups,
+            )
+            .await?;
+            if recovered > 0 {
+                info!(recovered_chunks = recovered, "recovered missing chunks via FEC");
+            }
+        }
+
         // 7. Verify all files
         info!("All chunks received, verifying file integrity...");
         let mut all_hashes = Vec::new();
@@ -1771,19 +2162,12 @@ impl Receiver {
         let manifest_hash = verify::hash_bytes(&all_hashes);
 
         // 8. Send completion
-        wire::write_control_message(
+        send_final_transfer_complete_shared(
             &mut ctrl_send,
-            &ControlMessage::TransferComplete {
-                file_blake3: manifest_hash,
-            },
+            manifest_hash,
+            "failed to finish receiver control stream",
         )
         .await?;
-
-        match wire::read_control_message(&mut ctrl_recv).await {
-            Ok(ControlMessage::TransferComplete { .. }) => {}
-            Ok(_) => warn!("Expected TransferComplete from sender"),
-            Err(e) => debug!("Control stream closed before sender confirmation: {}", e),
-        }
 
         self.state_manager.delete(&manifest.transfer_id)?;
 
@@ -1887,20 +2271,8 @@ impl Receiver {
                 existing
             }
             None => {
-                // Create directories and pre-allocate files.
                 for (i, dest_path) in dest_paths.iter().enumerate() {
-                    if let Some(parent) = dest_path.parent() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
-                    let file = tokio::fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .open(dest_path)
-                        .await?;
-                    if manifest.files[i].size > 0 {
-                        file.set_len(manifest.files[i].size).await?;
-                    }
+                    prepare_destination_file_shared(dest_path, manifest.files[i].size).await?;
                 }
 
                 TransferState::new(
@@ -1928,12 +2300,15 @@ impl Receiver {
         .await?;
 
         // 6. Receive chunks.
+        let mut sender_reported_complete = false;
+        let mut parity_groups = Vec::new();
         if state.received_count() < total_chunks {
             let mut ack_batch = Vec::new();
             let mut set = JoinSet::new();
+            let expected_manifest_hash = manifest.manifest_hash();
 
             loop {
-                if state.received_count() >= total_chunks {
+                if state.received_count() >= total_chunks || sender_reported_complete {
                     while let Some(result) = set.join_next().await {
                         self.handle_chunk_result(result, &mut state, &mut ack_batch);
                     }
@@ -1941,6 +2316,48 @@ impl Receiver {
                 }
 
                 tokio::select! {
+                    control_msg = wire::read_control_message(&mut ctrl_recv) => {
+                        match control_msg? {
+                            ControlMessage::TransferComplete { file_blake3 } => {
+                                if file_blake3 != expected_manifest_hash {
+                                    return Err(EngineError::HashMismatch(
+                                        "manifest hash mismatch on pull sender side".into(),
+                                    ));
+                                }
+                                if !set.is_empty() {
+                                    return Err(EngineError::Protocol(
+                                        "pull sender reported completion while chunks were still in flight".into(),
+                                    ));
+                                }
+                                sender_reported_complete = true;
+                            }
+                            ControlMessage::FecParity { chunk_indices, parity } => {
+                                parity_groups.push(PendingFecParity {
+                                    chunk_indices,
+                                    parity,
+                                });
+                            }
+                            ControlMessage::Error { code, message } => {
+                                return Err(EngineError::RemoteError { code, message });
+                            }
+                            ControlMessage::Cancel => {
+                                return Err(EngineError::Protocol(
+                                    "remote sender canceled pull while receiving chunks".into(),
+                                ));
+                            }
+                            ControlMessage::ProgressAck { .. }
+                            | ControlMessage::DeltaRequest { .. }
+                            | ControlMessage::DeltaSignatures { .. }
+                            | ControlMessage::DeltaNotAvailable { .. }
+                            | ControlMessage::ResumeState { .. }
+                            | ControlMessage::Manifest { .. }
+                            | ControlMessage::PullRequest { .. } => {
+                                return Err(EngineError::Protocol(
+                                    "unexpected control message while pull receiving chunks".into(),
+                                ));
+                            }
+                        }
+                    }
                     result = conn.accept_data_stream() => {
                         let (_send, mut recv) = result?;
                         let manifest_ref = manifest.clone();
@@ -2031,6 +2448,19 @@ impl Receiver {
             }
         }
 
+        if state.received_count() < total_chunks {
+            let recovered = recover_manifest_fec_chunks(
+                &manifest,
+                &dest_paths,
+                &mut state,
+                &parity_groups,
+            )
+            .await?;
+            if recovered > 0 {
+                info!(recovered_chunks = recovered, "recovered missing pull chunks via FEC");
+            }
+        }
+
         // 7. Verify all files.
         info!("All chunks received, verifying file integrity...");
         let mut all_hashes = Vec::new();
@@ -2047,19 +2477,12 @@ impl Receiver {
         let manifest_hash = verify::hash_bytes(&all_hashes);
 
         // 8. Send completion.
-        wire::write_control_message(
+        send_final_transfer_complete_shared(
             &mut ctrl_send,
-            &ControlMessage::TransferComplete {
-                file_blake3: manifest_hash,
-            },
+            manifest_hash,
+            "failed to finish receiver control stream",
         )
         .await?;
-
-        match wire::read_control_message(&mut ctrl_recv).await {
-            Ok(ControlMessage::TransferComplete { .. }) => {}
-            Ok(_) => warn!("Expected TransferComplete from remote sender"),
-            Err(e) => debug!("Control stream closed before sender confirmation: {}", e),
-        }
 
         self.state_manager.delete(&manifest.transfer_id)?;
 
@@ -2159,5 +2582,92 @@ fn resolve_dest_path(path: &Path, mode: OverwriteMode) -> Result<PathBuf> {
                 path.display()
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn manifest_fec_recovery_restores_one_missing_chunk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_path = tmp.path().join("src.bin");
+        let dest_path = tmp.path().join("dest.bin");
+        let block_size = 256 * 1024u32;
+
+        let mut source_data = vec![0u8; block_size as usize * 3];
+        for (idx, byte) in source_data.iter_mut().enumerate() {
+            *byte = (idx % 251) as u8;
+        }
+        tokio::fs::write(&src_path, &source_data).await.unwrap();
+
+        let file_hash = verify::hash_file(&src_path).await.unwrap();
+        let manifest = TransferManifest::new(
+            vec![FileEntry {
+                source_path: src_path.clone(),
+                dest_path: PathBuf::from("/dest.bin"),
+                size: source_data.len() as u64,
+                blake3_hash: file_hash,
+                relative_path: None,
+            }],
+            block_size,
+        )
+        .unwrap();
+
+        let mut state = TransferState::new(
+            manifest.transfer_id.clone(),
+            dest_path.to_string_lossy().into_owned(),
+            source_data.len() as u64,
+            block_size,
+            manifest.total_blocks(),
+            verify::hash_to_hex(&manifest.manifest_hash()),
+        );
+
+        let chunk0 = &source_data[..block_size as usize];
+        let chunk2 = &source_data[(block_size as usize * 2)..];
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&dest_path)
+            .await
+            .unwrap();
+        file.set_len(source_data.len() as u64).await.unwrap();
+        ChunkWriter::write_chunk(&dest_path, 0, chunk0).await.unwrap();
+        ChunkWriter::write_chunk(&dest_path, block_size as u64 * 2, chunk2)
+            .await
+            .unwrap();
+        state.mark_received(0);
+        state.mark_received(2);
+
+        let fec_messages = build_manifest_fec_messages(&manifest, &[0, 1, 2], 3)
+            .await
+            .unwrap();
+        let parity_groups: Vec<PendingFecParity> = fec_messages
+            .into_iter()
+            .filter_map(|msg| match msg {
+                ControlMessage::FecParity { chunk_indices, parity } => {
+                    Some(PendingFecParity {
+                        chunk_indices,
+                        parity,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+
+        let recovered = recover_manifest_fec_chunks(
+            &manifest,
+            std::slice::from_ref(&dest_path),
+            &mut state,
+            &parity_groups,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(recovered, 1);
+        assert_eq!(state.received_count(), 3);
+        assert_eq!(verify::hash_file(&dest_path).await.unwrap(), file_hash);
     }
 }

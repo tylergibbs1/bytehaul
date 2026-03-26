@@ -58,6 +58,9 @@ pub async fn run(source: &str, destination: &str, daemon: Option<&str>) -> Resul
         rtt: conn_rtt.unwrap_or(Duration::from_millis(50)),
         loss_rate: 0.0,
         bandwidth_bps: 0, // Unknown before transfer starts
+        burst_ratio: 0.0,
+        rtt_inflation: 1.0,
+        loss_class: bytehaul_proto::congestion::LossClass::Benign,
     };
     let settings = adaptive::compute_adaptive_settings(&profile);
 

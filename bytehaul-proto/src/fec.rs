@@ -228,6 +228,110 @@ pub fn recommended_group_size(loss_rate: f64) -> usize {
     }
 }
 
+/// Runtime path signals used to tune FEC more conservatively than a
+/// static loss-rate table.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FecPathSignals {
+    /// Smoothed packet loss rate.
+    pub loss_rate: f64,
+    /// Fraction of recent loss events that arrived in bursts.
+    pub burst_ratio: f64,
+    /// RTT inflation relative to the path baseline (1.0 = no inflation).
+    pub rtt_inflation: f64,
+    /// Optional application-observed retransmission pressure.
+    pub retransmission_ratio: f64,
+}
+
+/// Adaptive FEC controller inspired by recent erasure-coding work:
+/// use light redundancy early, then scale parity only when the path shows
+/// persistent burst loss without strong congestion inflation.
+#[derive(Debug, Clone)]
+pub struct AdaptiveFecController {
+    ewma_loss_rate: f64,
+    ewma_burst_ratio: f64,
+    ewma_rtt_inflation: f64,
+    ewma_retransmission_ratio: f64,
+    decision_hysteresis: usize,
+    last_group_size: usize,
+}
+
+impl Default for AdaptiveFecController {
+    fn default() -> Self {
+        Self {
+            ewma_loss_rate: 0.0,
+            ewma_burst_ratio: 0.0,
+            ewma_rtt_inflation: 1.0,
+            ewma_retransmission_ratio: 0.0,
+            decision_hysteresis: 0,
+            last_group_size: 0,
+        }
+    }
+}
+
+impl AdaptiveFecController {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Update smoothed path state and return the recommended FEC group size.
+    ///
+    /// Lower group sizes imply more parity overhead.
+    pub fn update(&mut self, sample: FecPathSignals) -> usize {
+        self.ewma_loss_rate = ewma(self.ewma_loss_rate, sample.loss_rate, 0.25);
+        self.ewma_burst_ratio = ewma(self.ewma_burst_ratio, sample.burst_ratio, 0.3);
+        self.ewma_rtt_inflation = ewma(self.ewma_rtt_inflation, sample.rtt_inflation, 0.2);
+        self.ewma_retransmission_ratio = ewma(
+            self.ewma_retransmission_ratio,
+            sample.retransmission_ratio,
+            0.25,
+        );
+
+        let path_stress = self.ewma_loss_rate
+            + (self.ewma_burst_ratio * 0.5)
+            + (self.ewma_retransmission_ratio * 0.5);
+        let congestion_penalty = (self.ewma_rtt_inflation - 1.0).max(0.0);
+
+        // If RTT is inflating strongly, prefer backing off congestion rather
+        // than spending extra parity budget. If loss is bursty with modest RTT
+        // inflation, bias toward more parity.
+        let target = if path_stress < 0.001 {
+            0
+        } else if congestion_penalty > 0.5 && self.ewma_loss_rate < 0.02 {
+            0
+        } else if path_stress < 0.01 {
+            15
+        } else if path_stress < 0.03 {
+            11
+        } else if path_stress < 0.08 {
+            7
+        } else {
+            3
+        };
+
+        // Hysteresis to avoid oscillation on noisy paths.
+        if target == self.last_group_size {
+            self.decision_hysteresis = 0;
+            return target;
+        }
+
+        self.decision_hysteresis += 1;
+        if self.decision_hysteresis >= 2 {
+            self.last_group_size = target;
+            self.decision_hysteresis = 0;
+        }
+
+        self.last_group_size
+    }
+}
+
+fn ewma(old: f64, new: f64, alpha: f64) -> f64 {
+    if old == 0.0 && new > 0.0 {
+        new
+    } else {
+        old * (1.0 - alpha) + new * alpha
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +426,64 @@ mod tests {
         assert_eq!(parity[0], 0xAA ^ 0xDD);
         assert_eq!(parity[1], 0xBB ^ 0xEE);
         assert_eq!(parity[2], 0xCC ^ 0x00); // XOR with implicit 0 padding
+    }
+
+    #[test]
+    fn adaptive_fec_prefers_light_parity_on_clean_paths() {
+        let mut ctl = AdaptiveFecController::new();
+        assert_eq!(
+            ctl.update(FecPathSignals {
+                loss_rate: 0.0001,
+                burst_ratio: 0.0,
+                rtt_inflation: 1.02,
+                retransmission_ratio: 0.0,
+            }),
+            0
+        );
+        assert_eq!(
+            ctl.update(FecPathSignals {
+                loss_rate: 0.0001,
+                burst_ratio: 0.0,
+                rtt_inflation: 1.01,
+                retransmission_ratio: 0.0,
+            }),
+            0
+        );
+    }
+
+    #[test]
+    fn adaptive_fec_escalates_on_bursty_loss() {
+        let mut ctl = AdaptiveFecController::new();
+        ctl.update(FecPathSignals {
+            loss_rate: 0.03,
+            burst_ratio: 0.7,
+            rtt_inflation: 1.1,
+            retransmission_ratio: 0.02,
+        });
+        let group = ctl.update(FecPathSignals {
+            loss_rate: 0.04,
+            burst_ratio: 0.8,
+            rtt_inflation: 1.15,
+            retransmission_ratio: 0.03,
+        });
+        assert!(group == 7 || group == 3);
+    }
+
+    #[test]
+    fn adaptive_fec_avoids_overreacting_to_rtt_only_congestion() {
+        let mut ctl = AdaptiveFecController::new();
+        ctl.update(FecPathSignals {
+            loss_rate: 0.005,
+            burst_ratio: 0.1,
+            rtt_inflation: 1.8,
+            retransmission_ratio: 0.0,
+        });
+        let group = ctl.update(FecPathSignals {
+            loss_rate: 0.006,
+            burst_ratio: 0.1,
+            rtt_inflation: 2.0,
+            retransmission_ratio: 0.0,
+        });
+        assert_eq!(group, 0);
     }
 }

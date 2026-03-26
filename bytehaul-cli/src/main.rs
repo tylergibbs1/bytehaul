@@ -2,10 +2,12 @@ mod bench;
 mod clean;
 mod completions;
 mod daemon;
+mod doctor;
 mod gather;
 mod init;
 pub mod output;
 mod pull;
+mod profiles;
 mod send;
 mod smart;
 mod status;
@@ -30,6 +32,7 @@ use tracing_subscriber::EnvFilter;
                     bytehaul pull    Pull from remote\n  \
                     bytehaul sync    Bidirectional sync\n  \
                     bytehaul watch   Auto-send on changes\n  \
+                    bytehaul doctor  Preflight checks for send/pull/daemon\n  \
                     bytehaul gather  Collect from multiple hosts",
     version,
     propagate_version = true
@@ -60,6 +63,9 @@ enum Commands {
 
     /// Start a receiver daemon
     Daemon(daemon::DaemonArgs),
+
+    /// Run preflight checks for common workflows
+    Doctor(doctor::DoctorArgs),
 
     /// Run transfer benchmarks
     Bench(bench::BenchArgs),
@@ -92,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     // Smart mode detection: if first non-flag arg is a path (contains / or .)
     // and isn't a known subcommand, use smart mode.
     let known_subcommands = [
-        "send", "pull", "sync", "daemon", "bench", "init",
+        "send", "pull", "sync", "daemon", "doctor", "bench", "init",
         "status", "clean", "watch", "gather", "completions", "help",
     ];
 
@@ -170,6 +176,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Pull(args)) => pull::run(args).await,
         Some(Commands::Sync(args)) => sync_cmd::run(args).await,
         Some(Commands::Daemon(args)) => daemon::run(args).await,
+        Some(Commands::Doctor(args)) => doctor::run(args).await,
         Some(Commands::Bench(args)) => bench::run(args).await,
         Some(Commands::Init(args)) => init::run(args).await,
         Some(Commands::Status(args)) => status::run(args).await,
@@ -235,6 +242,12 @@ fn print_welcome() {
         style("│").dim(),
         style("bytehaul").cyan(),
         style("sync").white()
+    );
+    println!(
+        "  {}   {} {}  Preflight checks for send/pull/daemon",
+        style("│").dim(),
+        style("bytehaul").cyan(),
+        style("doctor").white()
     );
     println!(
         "  {}   {} {}   Auto-send on changes",

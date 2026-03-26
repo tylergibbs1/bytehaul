@@ -37,6 +37,14 @@ pub enum CongestionMode {
     Aggressive,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LossClass {
+    Benign,
+    Random,
+    RecoverableBurst,
+    Congestion,
+}
+
 impl std::fmt::Display for CongestionMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -181,6 +189,8 @@ pub struct ByteHaulCongestion {
     bytes_in_flight: u64,
     /// Slow-start threshold.
     ssthresh: u64,
+    /// Most recent loss classification.
+    last_loss_class: LossClass,
 }
 
 impl ByteHaulCongestion {
@@ -198,6 +208,7 @@ impl ByteHaulCongestion {
             smoothed_rtt: Duration::ZERO,
             bytes_in_flight: 0,
             ssthresh: u64::MAX,
+            last_loss_class: LossClass::Benign,
         }
     }
 
@@ -229,6 +240,10 @@ impl ByteHaulCongestion {
 
     pub fn ssthresh(&self) -> u64 {
         self.ssthresh
+    }
+
+    pub fn last_loss_class(&self) -> LossClass {
+        self.last_loss_class
     }
 
     // -- Mutations ------------------------------------------------------------
@@ -298,15 +313,63 @@ impl ByteHaulCongestion {
         );
     }
 
-    /// Record a congestion event (loss detected).
-    pub fn on_congestion_event(&mut self, lost_bytes: u64) {
-        self.bytes_in_flight = self.bytes_in_flight.saturating_sub(lost_bytes);
+    pub fn classify_loss(
+        &self,
+        loss_rate: f64,
+        burst_losses: u64,
+        current_rtt: Duration,
+    ) -> LossClass {
+        if loss_rate < 0.0005 && burst_losses == 0 {
+            return LossClass::Benign;
+        }
 
-        // Multiplicative decrease.
-        let factor = match self.mode {
-            CongestionMode::Fair => 0.5,
-            // Aggressive backs off less.
-            CongestionMode::Aggressive => 0.7,
+        let baseline = if self.min_rtt == Duration::from_secs(u64::MAX) || self.min_rtt.is_zero() {
+            current_rtt
+        } else {
+            self.min_rtt
+        };
+        let inflation = if baseline.is_zero() {
+            1.0
+        } else {
+            current_rtt.as_secs_f64() / baseline.as_secs_f64()
+        };
+
+        if inflation < 1.1 && loss_rate < 0.01 {
+            return LossClass::Random;
+        }
+
+        if inflation < 1.25 && burst_losses <= 3 {
+            return LossClass::RecoverableBurst;
+        }
+
+        LossClass::Congestion
+    }
+
+    /// Record a loss event and adapt the bookkeeping window based on the
+    /// inferred loss class.
+    pub fn on_loss_event(&mut self, lost_bytes: u64, class: LossClass) {
+        self.bytes_in_flight = self.bytes_in_flight.saturating_sub(lost_bytes);
+        self.last_loss_class = class;
+
+        if matches!(class, LossClass::Benign) {
+            trace!(lost_bytes, "benign loss event");
+            return;
+        }
+
+        let factor = match class {
+            LossClass::Benign => 1.0,
+            LossClass::Random => match self.mode {
+                CongestionMode::Fair => 0.9,
+                CongestionMode::Aggressive => 0.94,
+            },
+            LossClass::RecoverableBurst => match self.mode {
+                CongestionMode::Fair => 0.8,
+                CongestionMode::Aggressive => 0.88,
+            },
+            LossClass::Congestion => match self.mode {
+                CongestionMode::Fair => 0.5,
+                CongestionMode::Aggressive => 0.7,
+            },
         };
 
         self.ssthresh = ((self.current_window as f64) * factor) as u64;
@@ -315,10 +378,16 @@ impl ByteHaulCongestion {
 
         debug!(
             lost_bytes,
+            ?class,
             window = self.current_window,
             ssthresh = self.ssthresh,
-            "congestion event"
+            "loss event"
         );
+    }
+
+    /// Backwards-compatible helper for callers that only know a loss occurred.
+    pub fn on_congestion_event(&mut self, lost_bytes: u64) {
+        self.on_loss_event(lost_bytes, LossClass::Congestion);
     }
 
     /// Update the congestion window to mirror Quinn's reported value.
@@ -530,6 +599,35 @@ mod tests {
 
         cc.on_congestion_event(5000);
         assert!(cc.current_window() < before);
+    }
+
+    #[test]
+    fn test_loss_classifier_prefers_recoverable_burst_without_rtt_inflation() {
+        let mut cc = ByteHaulCongestion::new(CongestionMode::Fair);
+        cc.on_ack(1500, Duration::from_millis(40));
+        let class = cc.classify_loss(0.01, 2, Duration::from_millis(44));
+        assert_eq!(class, LossClass::RecoverableBurst);
+    }
+
+    #[test]
+    fn test_loss_classifier_marks_inflated_rtt_as_congestion() {
+        let mut cc = ByteHaulCongestion::new(CongestionMode::Fair);
+        cc.on_ack(1500, Duration::from_millis(40));
+        let class = cc.classify_loss(0.02, 6, Duration::from_millis(90));
+        assert_eq!(class, LossClass::Congestion);
+    }
+
+    #[test]
+    fn test_random_loss_backs_off_less_than_congestion() {
+        let mut random = ByteHaulCongestion::new(CongestionMode::Fair);
+        let mut congested = ByteHaulCongestion::new(CongestionMode::Fair);
+        random.sync_window(1_000_000);
+        congested.sync_window(1_000_000);
+
+        random.on_loss_event(1000, LossClass::Random);
+        congested.on_loss_event(1000, LossClass::Congestion);
+
+        assert!(random.current_window() > congested.current_window());
     }
 
     #[test]

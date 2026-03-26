@@ -7,43 +7,50 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use bytehaul_lib::client::Client;
 use bytehaul_lib::config::TransferConfig;
-use bytehaul_proto::congestion::CongestionMode;
+
+use crate::profiles::{apply_transfer_profile, TransferProfile};
 
 #[derive(Args)]
 pub struct PullArgs {
     /// Remote source (user@host:/path or host:/path)
+    #[arg(help_heading = "Common")]
     pub source: String,
 
     /// Local destination directory
+    #[arg(help_heading = "Common")]
     pub destination: String,
 
     /// Resume a previous transfer
-    #[arg(long)]
+    #[arg(long, help_heading = "Common")]
     pub resume: bool,
 
-    /// Use aggressive congestion control (saturate link)
-    #[arg(long)]
-    pub aggressive: bool,
-
-    /// Maximum transfer rate (e.g., 500mbps, 1gbps)
-    #[arg(long)]
-    pub max_rate: Option<String>,
-
-    /// Block size in MB
-    #[arg(long, default_value = "16")]
-    pub block_size: u32,
-
-    /// Number of parallel streams
-    #[arg(long, default_value = "16")]
-    pub parallel: usize,
+    /// Friendly preset for common transfer patterns
+    #[arg(long, value_enum, default_value_t = TransferProfile::Dev, help_heading = "Common")]
+    pub profile: TransferProfile,
 
     /// Connect to a running daemon instead of SSH bootstrap
-    #[arg(long)]
+    #[arg(long, help_heading = "Common")]
     pub daemon: Option<String>,
 
     /// Pull directory recursively
-    #[arg(short = 'r', long)]
+    #[arg(short = 'r', long, help_heading = "Common")]
     pub recursive: bool,
+
+    /// Block size in MB
+    #[arg(long, default_value = "16", help_heading = "Advanced")]
+    pub block_size: u32,
+
+    /// Number of parallel streams
+    #[arg(long, default_value = "16", help_heading = "Advanced")]
+    pub parallel: usize,
+
+    /// Use aggressive congestion control (saturate link)
+    #[arg(long, help_heading = "Advanced")]
+    pub aggressive: bool,
+
+    /// Maximum transfer rate (e.g., 500mbps, 1gbps)
+    #[arg(long, help_heading = "Advanced")]
+    pub max_rate: Option<String>,
 }
 
 pub async fn run(args: PullArgs) -> Result<()> {
@@ -65,15 +72,13 @@ pub async fn run(args: PullArgs) -> Result<()> {
     };
 
     // Build config
-    let mut config = TransferConfig::builder()
-        .resume(args.resume)
-        .block_size_mb(args.block_size)
-        .max_parallel_streams(args.parallel)
-        .congestion(if args.aggressive {
-            CongestionMode::Aggressive
-        } else {
-            CongestionMode::Fair
-        });
+    let (mut config, tuning) = apply_transfer_profile(
+        TransferConfig::builder().resume(args.resume),
+        args.profile,
+        args.block_size,
+        args.parallel,
+        args.aggressive,
+    );
 
     if let Some(ref rate) = args.max_rate {
         let mbps = parse_rate(rate)?;
@@ -99,11 +104,13 @@ pub async fn run(args: PullArgs) -> Result<()> {
 
     let client = client.with_config(config);
 
+    eprintln!("{}", tuning.summary_line());
     eprintln!(
         "  Pulling: {} -> {}",
         style(&args.source).bold(),
         style(dest.display()).bold(),
     );
+    eprintln!("  State: connected, requesting manifest, receiving, waiting for verification...");
 
     // Set up progress bar (unknown size until manifest arrives, use spinner first)
     let pb = ProgressBar::new_spinner();

@@ -7,11 +7,12 @@
 ## Quick Start
 
 ```bash
-# Zero config -- just works
-bytehaul ./checkpoint.pt gpu-node:/data/
-bytehaul ./dataset/ gpu-node:/data/
+# Common path
+bytehaul send ./checkpoint.pt gpu-node:/data/
+bytehaul send -r ./dataset/ gpu-node:/data/
 
-# Auto-detects: file vs directory, resume, delta, compression, optimal settings
+# Profiles enable adaptive tuning by default
+bytehaul send --profile dev ./checkpoint.pt gpu-node:/data/
 ```
 
 ## Performance (Real AWS, Ohio to Ireland, ~85ms RTT)
@@ -83,13 +84,14 @@ bytehaul completions zsh  # Shell completions
 ## How It Works
 
 1. **QUIC transport** via Quinn -- parallel streams eliminate head-of-line blocking
-2. **BBR congestion control** with 128KB initial window for fast ramp-up
-3. **16MB blocks** -- optimized for high-BDP links (35% faster than 4MB)
+2. **Adaptive transport tuning** -- classifies loss, adjusts stream parallelism, and can enable parity on lossy paths
+3. **Large blocks** -- profiles choose block sizes for high-BDP links
 4. **BLAKE3 verification** -- per-chunk and whole-file integrity
 5. **Resumable** -- transfer state persisted atomically, crash-safe
 6. **Delta transfers** -- only send changed blocks
-7. **zstd compression** -- auto-detected for compressible data
-8. **SSH bootstrap** -- no daemon pre-install needed, auto-uploads binary
+7. **FEC parity** -- manifest-based transfers can send XOR repair parity over the control stream
+8. **zstd compression** -- optional per-chunk compression
+9. **SSH bootstrap** -- no daemon pre-install needed, auto-uploads binary
 
 ## Library API (Rust)
 
@@ -100,6 +102,7 @@ let client = Client::connect_ssh("user@gpu-node").await?;
 let config = TransferConfig::builder()
     .delta(true)
     .compress(true)
+    .adaptive(true)
     .build();
 
 let mut transfer = client
@@ -141,6 +144,7 @@ congestion = "aggressive"
 resume = true
 delta = false
 compress = false
+adaptive = true
 
 [daemon]
 port = 7700
@@ -151,7 +155,7 @@ bind = "0.0.0.0"
 
 | Crate | Purpose |
 |---|---|
-| `bytehaul-proto` | Core protocol: QUIC transport, chunking, verification, resume, delta, FEC, compression |
+| `bytehaul-proto` | Core protocol: QUIC transport, chunking, verification, resume, delta, adaptive FEC, compression |
 | `bytehaul-lib` | Public Rust API: Client, Server, TransferConfig |
 | `bytehaul-cli` | CLI: send, pull, sync, watch, gather, daemon, status, clean, init |
 | `bytehaul-bench` | Benchmark infrastructure with tc/netem scenarios |
@@ -190,6 +194,13 @@ All benchmarks use real AWS infrastructure (not simulated). Standard test setup:
 - **Iterations**: 3 runs per configuration, results are averages
 
 200+ experiments across 6 benchmark rounds validating all features.
+
+## Protocol Notes
+
+- Profiles in the CLI enable adaptive transfer behavior by default.
+- Manifest-based transfers can emit `FecParity` control messages containing XOR parity for a small batch of chunk indices.
+- The receiver can use that parity to recover one missing chunk in the group before final file verification.
+- This is currently implemented on the manifest transfer path used by directories, pulls, and single-file sends when adaptive or FEC is active.
 
 ## License
 

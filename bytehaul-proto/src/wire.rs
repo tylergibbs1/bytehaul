@@ -107,6 +107,15 @@ pub enum ControlMessage {
     /// Contains the BLAKE3 hash of the fully reassembled file.
     TransferComplete { file_blake3: [u8; 32] },
 
+    /// Sender emits XOR parity over a small batch of chunk indices so the
+    /// receiver can recover one missing chunk without a retransmission RTT.
+    FecParity {
+        /// Global chunk indices covered by this parity block.
+        chunk_indices: Vec<u64>,
+        /// XOR parity over the uncompressed chunk bytes.
+        parity: Vec<u8>,
+    },
+
     /// Signals an application-level error to the peer.
     Error { code: ErrorCode, message: String },
 

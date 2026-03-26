@@ -8,10 +8,12 @@
 //!
 //! - **Implemented**: `compute_adaptive_settings()` returns optimal config
 //!   from observed RTT, loss rate, and bandwidth. Fully tested.
-//! - **Wired (read-only)**: The engine logs the initial RTT profile when
-//!   `adaptive: true` is set. Settings are not yet applied mid-transfer.
-//! - **Planned (v0.4)**: Mid-transfer re-profiling after first batch,
-//!   congestion controller switching, FEC activation, stream count tuning.
+//! - **Wired**: The engine re-samples QUIC stats mid-transfer, classifies
+//!   loss, adjusts stream parallelism, and selects FEC group sizes.
+//! - **Implemented on manifest transfers**: parity messages can be emitted on
+//!   the control stream and consumed by the receiver before final verification.
+//! - **Still planned**: deeper transport-level integration such as feeding
+//!   parity decisions directly into Quinn or adding richer multipath logic.
 //!
 //! # Research basis
 //!
@@ -19,10 +21,11 @@
 //! - FEC group sizing from loss rate (arxiv:1904.11326 QUIC-FEC)
 //! - GSO for high-bandwidth links (arxiv:2310.09423)
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use tracing::{debug, info};
+use tracing::info;
 
+use crate::congestion::LossClass;
 use crate::fec;
 use crate::transport::CongestionAlgo;
 
@@ -35,6 +38,12 @@ pub struct NetworkProfile {
     pub loss_rate: f64,
     /// Estimated available bandwidth in bytes/sec.
     pub bandwidth_bps: u64,
+    /// Fraction of recent loss events that were bursty.
+    pub burst_ratio: f64,
+    /// RTT inflation relative to the baseline RTT (1.0 = no inflation).
+    pub rtt_inflation: f64,
+    /// Classification of the observed loss regime.
+    pub loss_class: LossClass,
 }
 
 /// Recommended transfer settings based on network profile.
@@ -76,24 +85,37 @@ pub fn compute_adaptive_settings(profile: &NetworkProfile) -> AdaptiveSettings {
     let mut rationale = Vec::new();
 
     // ── Congestion algorithm ──
-    let congestion_algo = if profile.loss_rate > 0.001 {
+    let congestion_algo = if matches!(profile.loss_class, LossClass::Congestion)
+        || (profile.loss_rate > 0.001 && profile.rtt_inflation > 1.2)
+    {
         rationale.push(format!(
-            "Cubic selected: {:.1}% loss detected (BBR degrades above 0.1%)",
-            profile.loss_rate * 100.0
+            "Cubic selected: congestion-like loss ({:.1}% loss, {:.2}x RTT inflation)",
+            profile.loss_rate * 100.0,
+            profile.rtt_inflation
         ));
         CongestionAlgo::Cubic
     } else {
-        rationale.push("BBR selected: clean link (<0.1% loss)".into());
+        rationale.push(format!(
+            "BBR selected: non-congestive loss ({:.1}% loss, {:.2}x RTT inflation)",
+            profile.loss_rate * 100.0,
+            profile.rtt_inflation
+        ));
         CongestionAlgo::Bbr
     };
 
     // ── FEC ──
-    let fec_group_size = fec::recommended_group_size(profile.loss_rate);
+    let mut fec_ctl = fec::AdaptiveFecController::new();
+    let fec_group_size = fec_ctl.update(fec::FecPathSignals {
+        loss_rate: profile.loss_rate,
+        burst_ratio: profile.burst_ratio,
+        rtt_inflation: profile.rtt_inflation,
+        retransmission_ratio: profile.loss_rate,
+    });
     if fec_group_size > 0 {
         let overhead = 100.0 / (fec_group_size as f64 + 1.0);
         rationale.push(format!(
-            "FEC enabled: group_size={} ({:.1}% overhead) for {:.1}% loss",
-            fec_group_size, overhead, profile.loss_rate * 100.0
+            "FEC enabled: group_size={} ({:.1}% overhead), burst_ratio {:.2}",
+            fec_group_size, overhead, profile.burst_ratio
         ));
     }
 
@@ -169,6 +191,19 @@ pub fn profile_from_quinn_stats(
         rtt,
         loss_rate,
         bandwidth_bps,
+        burst_ratio: if sent_packets > 0 {
+            (lost_packets.min(4) as f64 / sent_packets as f64).min(1.0)
+        } else {
+            0.0
+        },
+        rtt_inflation: 1.0,
+        loss_class: if loss_rate > 0.02 {
+            LossClass::Congestion
+        } else if loss_rate > 0.0 {
+            LossClass::Random
+        } else {
+            LossClass::Benign
+        },
     };
 
     info!(
@@ -203,6 +238,9 @@ mod tests {
             rtt: Duration::from_millis(50),
             loss_rate: 0.0,
             bandwidth_bps: 125_000_000, // 1 Gbps
+            burst_ratio: 0.0,
+            rtt_inflation: 1.0,
+            loss_class: LossClass::Benign,
         };
         let settings = compute_adaptive_settings(&profile);
         assert_eq!(settings.congestion_algo, CongestionAlgo::Bbr);
@@ -215,6 +253,9 @@ mod tests {
             rtt: Duration::from_millis(100),
             loss_rate: 0.02, // 2% loss
             bandwidth_bps: 12_500_000, // 100 Mbps
+            burst_ratio: 0.4,
+            rtt_inflation: 1.5,
+            loss_class: LossClass::Congestion,
         };
         let settings = compute_adaptive_settings(&profile);
         assert_eq!(settings.congestion_algo, CongestionAlgo::Cubic);
@@ -227,6 +268,9 @@ mod tests {
             rtt: Duration::from_millis(200),
             loss_rate: 0.1, // 10% loss
             bandwidth_bps: 1_250_000, // 10 Mbps
+            burst_ratio: 0.8,
+            rtt_inflation: 1.7,
+            loss_class: LossClass::Congestion,
         };
         let settings = compute_adaptive_settings(&profile);
         assert_eq!(settings.congestion_algo, CongestionAlgo::Cubic);
@@ -239,6 +283,9 @@ mod tests {
             rtt: Duration::from_millis(1),
             loss_rate: 0.0,
             bandwidth_bps: 1_250_000_000, // 10 Gbps
+            burst_ratio: 0.0,
+            rtt_inflation: 1.0,
+            loss_class: LossClass::Benign,
         };
         let settings = compute_adaptive_settings(&profile);
         assert!(settings.enable_gso);
@@ -251,6 +298,9 @@ mod tests {
             rtt: Duration::from_millis(300),
             loss_rate: 0.005, // 0.5%
             bandwidth_bps: 625_000, // 5 Mbps
+            burst_ratio: 0.2,
+            rtt_inflation: 1.05,
+            loss_class: LossClass::Random,
         };
         let settings = compute_adaptive_settings(&profile);
         assert_eq!(settings.congestion_algo, CongestionAlgo::Cubic);
@@ -258,6 +308,21 @@ mod tests {
         assert!(!settings.enable_gso);
         assert_eq!(settings.block_size, 4 * 1024 * 1024); // 4 MB
         assert_eq!(settings.parallel_streams, 8);
+    }
+
+    #[test]
+    fn recoverable_loss_prefers_bbr_plus_fec() {
+        let profile = NetworkProfile {
+            rtt: Duration::from_millis(60),
+            loss_rate: 0.01,
+            bandwidth_bps: 25_000_000,
+            burst_ratio: 0.7,
+            rtt_inflation: 1.05,
+            loss_class: LossClass::RecoverableBurst,
+        };
+        let settings = compute_adaptive_settings(&profile);
+        assert_eq!(settings.congestion_algo, CongestionAlgo::Bbr);
+        assert!(settings.fec_group_size > 0);
     }
 
     #[test]
