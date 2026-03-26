@@ -157,10 +157,87 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         return Ok(());
     }
 
+    // ── Multi-destination fan-out ──
+    // If multiple destinations, send to each in parallel.
+    if args.destinations.len() > 1 && args.daemon.is_none() {
+        reporter.info(&format!(
+            "  Fan-out: sending to {} destinations in parallel",
+            args.destinations.len()
+        ));
+
+        let mut handles = Vec::new();
+        for (i, dest) in args.destinations.iter().enumerate() {
+            let dest = dest.clone();
+            let source = source.clone();
+            let is_dir = is_dir;
+            let config = TransferConfig::builder()
+                .resume(args.resume)
+                .block_size_mb(args.block_size)
+                .max_parallel_streams(args.parallel)
+                .congestion(if args.aggressive {
+                    CongestionMode::Aggressive
+                } else {
+                    CongestionMode::Fair
+                })
+                .delta(args.delta)
+                .build();
+            let include = args.include.clone();
+            let exclude = args.exclude.clone();
+
+            handles.push(tokio::spawn(async move {
+                let (remote, remote_path) = parse_destination(&dest)?;
+                let client = Client::connect_ssh(&remote).await?;
+                let client = client.with_config(config);
+                let source_str = source.to_str().unwrap_or("");
+                let has_filters = !include.is_empty() || !exclude.is_empty();
+
+                let transfer = if is_dir && has_filters {
+                    let filter = FileFilter::new(&include, &exclude)?;
+                    client.send_directory_filtered(source_str, &remote_path, filter).await?
+                } else if is_dir {
+                    client.send_directory(source_str, &remote_path).await?
+                } else {
+                    client.send_file(source_str, &remote_path).await?
+                };
+
+                transfer.wait().await?;
+                Ok::<String, anyhow::Error>(dest)
+            }));
+        }
+
+        let mut successes = 0;
+        let mut failures = 0;
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(dest)) => {
+                    reporter.info(&format!("  {} {}", style("✓").green(), dest));
+                    successes += 1;
+                }
+                Ok(Err(e)) => {
+                    reporter.info(&format!("  {} {}", style("✗").red(), e));
+                    failures += 1;
+                }
+                Err(e) => {
+                    reporter.info(&format!("  {} task panicked: {}", style("✗").red(), e));
+                    failures += 1;
+                }
+            }
+        }
+
+        reporter.info(&format!(
+            "\n  Fan-out complete: {} succeeded, {} failed",
+            successes, failures
+        ));
+        if failures > 0 {
+            anyhow::bail!("{} of {} destinations failed", failures, successes + failures);
+        }
+        return Ok(());
+    }
+
+    // ── Single destination ──
     // Parse destination: in daemon mode, destination is just a remote path;
     // in SSH mode, it's user@host:/path
     let (remote, remote_path) = if args.daemon.is_some() {
-        // With --daemon, the destination is just the remote path
         (String::new(), args.destinations[0].clone())
     } else {
         parse_destination(&args.destinations[0])?

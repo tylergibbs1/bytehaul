@@ -7,6 +7,7 @@ pub mod output;
 mod pull;
 mod send;
 mod status;
+mod sync_cmd;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -24,6 +25,8 @@ use tracing_subscriber::EnvFilter;
                     bytehaul send --daemon 10.0.0.5:7700 ./file.bin /dest\n  \
                     bytehaul pull user@remote:/data/file.bin ./local/\n  \
                     bytehaul pull -r user@remote:/dataset/ ./local/\n  \
+                    bytehaul sync ./checkpoints/ gpu-node:/mnt/checkpoints/\n  \
+                    bytehaul send ./data host1:/path host2:/path host3:/path\n  \
                     bytehaul daemon --port 7700 --dest /data/incoming\n  \
                     bytehaul status\n  \
                     bytehaul clean --max-age 3d",
@@ -50,6 +53,9 @@ enum Commands {
 
     /// Pull a file or directory from a remote host
     Pull(pull::PullArgs),
+
+    /// Sync a directory bidirectionally with a remote host
+    Sync(sync_cmd::SyncArgs),
 
     /// Start a receiver daemon
     Daemon(daemon::DaemonArgs),
@@ -94,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Send(args) => send::run(args, cli.json).await,
         Commands::Pull(args) => pull::run(args).await,
+        Commands::Sync(args) => sync_cmd::run(args).await,
         Commands::Daemon(args) => daemon::run(args).await,
         Commands::Bench(args) => bench::run(args).await,
         Commands::Init(args) => init::run(args).await,

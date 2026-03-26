@@ -147,6 +147,17 @@ impl TransferManifest {
         })
     }
 
+    /// Create an empty manifest (no files). Used for sync when the local
+    /// directory is empty.
+    pub fn empty(block_size: u32) -> Self {
+        Self {
+            transfer_id: String::new(),
+            files: Vec::new(),
+            block_size,
+            created_at: Utc::now(),
+        }
+    }
+
     /// Build a manifest for a **single file** transfer.
     ///
     /// The file at `source_path` is read and hashed with BLAKE3. The manifest
