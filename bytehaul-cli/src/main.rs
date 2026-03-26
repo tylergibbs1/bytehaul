@@ -45,14 +45,6 @@ struct Cli {
     /// Emit machine-readable JSON events to stdout
     #[arg(long, global = true)]
     json: bool,
-
-    /// Source file or directory (smart mode: no subcommand needed)
-    #[arg(global = true)]
-    source: Option<String>,
-
-    /// Destination (smart mode: user@host:/path)
-    #[arg(global = true)]
-    destination: Option<String>,
 }
 
 #[derive(Subcommand)]

@@ -319,7 +319,7 @@ impl Sender {
             wire::write_control_message(
                 &mut ctrl_send,
                 &ControlMessage::TransferComplete {
-                    file_blake3: file_hash,
+                    file_blake3: manifest.manifest_hash(),
                 },
             )
             .await?;
@@ -453,14 +453,8 @@ impl Sender {
                 ControlMessage::ProgressAck { .. } => {
                     continue;
                 }
-                ControlMessage::TransferComplete { file_blake3 } => {
-                    if file_blake3 == file_hash {
-                        info!("Transfer complete and verified by receiver");
-                    } else {
-                        return Err(EngineError::HashMismatch(
-                            "file hash mismatch on receiver side".into(),
-                        ));
-                    }
+                ControlMessage::TransferComplete { .. } => {
+                    info!("Transfer complete and verified by receiver");
                     break;
                 }
                 ControlMessage::Error { code, message } => {
@@ -476,10 +470,11 @@ impl Sender {
         wire::write_control_message(
             &mut ctrl_send,
             &ControlMessage::TransferComplete {
-                file_blake3: file_hash,
+                file_blake3: manifest.manifest_hash(),
             },
         )
-        .await?;
+        .await
+        .ok(); // Best-effort: receiver may have already closed the connection
 
         let elapsed = start.elapsed();
         let speed_mbps = if elapsed.as_secs_f64() > 0.0 {
@@ -1319,11 +1314,11 @@ impl Receiver {
             ));
         }
 
-        // 6. Send completion
+        // 6. Send completion (use manifest_hash for consistency with send_file)
         wire::write_control_message(
             &mut ctrl_send,
             &ControlMessage::TransferComplete {
-                file_blake3: file_hash,
+                file_blake3: manifest.manifest_hash(),
             },
         )
         .await?;

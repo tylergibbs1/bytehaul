@@ -56,22 +56,17 @@ pub async fn run(source: &str, destination: &str, daemon: Option<&str>) -> Resul
     let conn_rtt = client.connection_rtt();
     let profile = adaptive::NetworkProfile {
         rtt: conn_rtt.unwrap_or(Duration::from_millis(50)),
-        loss_rate: 0.0, // No data yet; will be measured if we add mid-transfer profiling
-        bandwidth_bps: total_size.max(1), // Rough estimate; will be refined
+        loss_rate: 0.0,
+        bandwidth_bps: 0, // Unknown before transfer starts
     };
     let settings = adaptive::compute_adaptive_settings(&profile);
 
     // ── Step 3: Apply adaptive settings ──
-    let congestion = match settings.congestion_algo {
-        bytehaul_proto::transport::CongestionAlgo::Bbr => {
-            print_detail("Congestion", "BBR (clean link detected)");
-            CongestionMode::Aggressive
-        }
-        bytehaul_proto::transport::CongestionAlgo::Cubic => {
-            print_detail("Congestion", "Cubic (lossy link detected)");
-            CongestionMode::Fair
-        }
-    };
+    // Note: CongestionMode (Fair/Aggressive) adjusts Quinn window sizes.
+    // The actual BBR vs Cubic selection is in TransportConfig, set at
+    // connection time. Smart mode uses Aggressive (larger windows) since
+    // the user explicitly chose ByteHaul for throughput.
+    let congestion = CongestionMode::Aggressive;
 
     print_detail("Block size", &format!("{} MB", settings.block_size / (1024 * 1024)));
     print_detail("Streams", &format!("{}", settings.parallel_streams));
