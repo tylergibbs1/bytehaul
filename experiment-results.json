@@ -1,0 +1,452 @@
+[
+  {
+    "experiment": 1,
+    "name": "shutdown-fix-100mb",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.2,
+    "size_mb": 100,
+    "speed_mbps": 16.12
+  },
+  {
+    "experiment": 2,
+    "name": "shutdown-fix-100mb",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.19,
+    "size_mb": 100,
+    "speed_mbps": 16.16
+  },
+  {
+    "experiment": 3,
+    "name": "shutdown-fix-100mb",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.2,
+    "size_mb": 100,
+    "speed_mbps": 16.14
+  },
+  {
+    "experiment": 4,
+    "name": "parallel-2-streams",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 5.93,
+    "size_mb": 100,
+    "speed_mbps": 16.85
+  },
+  {
+    "experiment": 5,
+    "name": "parallel-4-streams",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.05,
+    "size_mb": 100,
+    "speed_mbps": 16.52
+  },
+  {
+    "experiment": 6,
+    "name": "parallel-8-streams",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.13,
+    "size_mb": 100,
+    "speed_mbps": 16.31
+  },
+  {
+    "experiment": 7,
+    "name": "parallel-16-streams",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.21,
+    "size_mb": 100,
+    "speed_mbps": 16.11
+  },
+  {
+    "experiment": 8,
+    "name": "parallel-32-streams",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.23,
+    "size_mb": 100,
+    "speed_mbps": 16.06
+  },
+  {
+    "experiment": 9,
+    "name": "parallel-64-streams",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.21,
+    "size_mb": 100,
+    "speed_mbps": 16.09
+  },
+  {
+    "experiment": 10,
+    "name": "blocksize-1mb",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.19,
+    "size_mb": 100,
+    "speed_mbps": 16.16
+  },
+  {
+    "experiment": 11,
+    "name": "blocksize-2mb",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.18,
+    "size_mb": 100,
+    "speed_mbps": 16.17
+  },
+  {
+    "experiment": 12,
+    "name": "blocksize-4mb",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.19,
+    "size_mb": 100,
+    "speed_mbps": 16.16
+  },
+  {
+    "experiment": 13,
+    "name": "blocksize-8mb",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.24,
+    "size_mb": 100,
+    "speed_mbps": 16.02
+  },
+  {
+    "experiment": 14,
+    "name": "blocksize-16mb",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.09,
+    "size_mb": 100,
+    "speed_mbps": 16.41
+  },
+  {
+    "experiment": 15,
+    "name": "blocksize-64mb",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 5.99,
+    "size_mb": 100,
+    "speed_mbps": 16.7
+  },
+  {
+    "experiment": 16,
+    "name": "filesize-1mb",
+    "tool": "bytehaul",
+    "file": "1MB",
+    "seconds": 5.79,
+    "size_mb": 1,
+    "speed_mbps": 0.17
+  },
+  {
+    "experiment": 17,
+    "name": "filesize-10mb",
+    "tool": "bytehaul",
+    "file": "10MB",
+    "seconds": 5.95,
+    "size_mb": 10,
+    "speed_mbps": 1.68
+  },
+  {
+    "experiment": 18,
+    "name": "filesize-50mb",
+    "tool": "bytehaul",
+    "file": "50MB",
+    "seconds": 6.15,
+    "size_mb": 50,
+    "speed_mbps": 8.13
+  },
+  {
+    "experiment": 19,
+    "name": "filesize-100mb",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.19,
+    "size_mb": 100,
+    "speed_mbps": 16.14
+  },
+  {
+    "experiment": 20,
+    "name": "filesize-500mb",
+    "tool": "bytehaul",
+    "file": "500MB",
+    "seconds": 6.42,
+    "size_mb": 500,
+    "speed_mbps": 77.91
+  },
+  {
+    "experiment": 21,
+    "name": "filesize-1024mb",
+    "tool": "bytehaul",
+    "file": "1024MB",
+    "seconds": 6.67,
+    "size_mb": 1024,
+    "speed_mbps": 153.52
+  },
+  {
+    "experiment": 22,
+    "name": "filesize-2048mb",
+    "tool": "bytehaul",
+    "file": "2048MB",
+    "seconds": 7.01,
+    "size_mb": 2048,
+    "speed_mbps": 292.22
+  },
+  {
+    "experiment": 23,
+    "name": "filesize-1mb",
+    "tool": "scp",
+    "file": "1MB",
+    "seconds": 2.13,
+    "size_mb": 1,
+    "speed_mbps": 0.47
+  },
+  {
+    "experiment": 24,
+    "name": "filesize-100mb",
+    "tool": "scp",
+    "file": "100MB",
+    "seconds": 6.27,
+    "size_mb": 100,
+    "speed_mbps": 15.95
+  },
+  {
+    "experiment": 25,
+    "name": "filesize-1024mb",
+    "tool": "scp",
+    "file": "1024MB",
+    "seconds": 42.2,
+    "size_mb": 1024,
+    "speed_mbps": 24.27
+  },
+  {
+    "experiment": 26,
+    "name": "dir-10x10mb",
+    "tool": "bytehaul",
+    "file": "10x10MB",
+    "seconds": 0.18,
+    "size_mb": 100,
+    "speed_mbps": 560.07
+  },
+  {
+    "experiment": 27,
+    "name": "dir-100x1mb",
+    "tool": "bytehaul",
+    "file": "100x1MB",
+    "seconds": 0.26,
+    "size_mb": 100,
+    "speed_mbps": 387.96
+  },
+  {
+    "experiment": 28,
+    "name": "dir-1000x100kb",
+    "tool": "bytehaul",
+    "file": "1000x100KB",
+    "seconds": 0.53,
+    "size_mb": 97,
+    "speed_mbps": 182.01
+  },
+  {
+    "experiment": 29,
+    "name": "dir-5000x10kb",
+    "tool": "bytehaul",
+    "file": "5000x10KB",
+    "seconds": 1.13,
+    "size_mb": 48,
+    "speed_mbps": 42.4
+  },
+  {
+    "experiment": 30,
+    "name": "dir-deep-10levels",
+    "tool": "bytehaul",
+    "file": "10x1MB-nested",
+    "seconds": 0.18,
+    "size_mb": 10,
+    "speed_mbps": 55.94
+  },
+  {
+    "experiment": 31,
+    "name": "dir-mixed-realistic",
+    "tool": "bytehaul",
+    "file": "mixed-51MB",
+    "seconds": 0.27,
+    "size_mb": 51,
+    "speed_mbps": 192.35
+  },
+  {
+    "experiment": 32,
+    "name": "dir-1000x100kb",
+    "tool": "scp",
+    "file": "1000x100KB",
+    "seconds": 230.11,
+    "size_mb": 97,
+    "speed_mbps": 0.42
+  },
+  {
+    "experiment": 33,
+    "name": "dir-1000x100kb",
+    "tool": "rsync",
+    "file": "1000x100KB",
+    "seconds": 1.84,
+    "size_mb": 97,
+    "speed_mbps": 52.86
+  },
+  {
+    "experiment": 34,
+    "name": "delta-0pct-changed",
+    "tool": "bytehaul-delta",
+    "file": "100MB",
+    "seconds": 6.23,
+    "size_mb": 100,
+    "speed_mbps": 16.06
+  },
+  {
+    "experiment": 35,
+    "name": "delta-1pct-changed",
+    "tool": "bytehaul-delta",
+    "file": "100MB",
+    "seconds": 6.27,
+    "size_mb": 100,
+    "speed_mbps": 15.96
+  },
+  {
+    "experiment": 36,
+    "name": "delta-10pct-changed",
+    "tool": "bytehaul-delta",
+    "file": "100MB",
+    "seconds": 6.27,
+    "size_mb": 100,
+    "speed_mbps": 15.96
+  },
+  {
+    "experiment": 37,
+    "name": "delta-50pct-changed",
+    "tool": "bytehaul-delta",
+    "file": "100MB",
+    "seconds": 6.25,
+    "size_mb": 100,
+    "speed_mbps": 15.99
+  },
+  {
+    "experiment": 38,
+    "name": "delta-100pct-changed",
+    "tool": "bytehaul-delta",
+    "file": "100MB",
+    "seconds": 0.18,
+    "size_mb": 100,
+    "speed_mbps": 562.73
+  },
+  {
+    "experiment": 39,
+    "name": "delta-disabled-full",
+    "tool": "bytehaul",
+    "file": "100MB",
+    "seconds": 6.19,
+    "size_mb": 100,
+    "speed_mbps": 16.16
+  },
+  {
+    "experiment": 40,
+    "name": "fair-100mb",
+    "tool": "bytehaul-fair",
+    "file": "100MB",
+    "seconds": 6.29,
+    "size_mb": 100,
+    "speed_mbps": 15.91
+  },
+  {
+    "experiment": 41,
+    "name": "aggressive-100mb",
+    "tool": "bytehaul-aggressive",
+    "file": "100MB",
+    "seconds": 6.2,
+    "size_mb": 100,
+    "speed_mbps": 16.13
+  },
+  {
+    "experiment": 42,
+    "name": "fair-1gb",
+    "tool": "bytehaul-fair",
+    "file": "1GB",
+    "seconds": 6.63,
+    "size_mb": 1024,
+    "speed_mbps": 154.37
+  },
+  {
+    "experiment": 43,
+    "name": "aggressive-1gb",
+    "tool": "bytehaul-aggressive",
+    "file": "1GB",
+    "seconds": 6.58,
+    "size_mb": 1024,
+    "speed_mbps": 155.71
+  },
+  {
+    "experiment": 44,
+    "name": "rsync-100mb",
+    "tool": "rsync",
+    "file": "100MB",
+    "seconds": 6.0,
+    "size_mb": 100,
+    "speed_mbps": 16.68
+  },
+  {
+    "experiment": 45,
+    "name": "rsync-z-100mb",
+    "tool": "rsync-compressed",
+    "file": "100MB",
+    "seconds": 5.96,
+    "size_mb": 100,
+    "speed_mbps": 16.77
+  },
+  {
+    "experiment": 46,
+    "name": "rsync-1gb",
+    "tool": "rsync",
+    "file": "1GB",
+    "seconds": 41.95,
+    "size_mb": 1024,
+    "speed_mbps": 24.41
+  },
+  {
+    "experiment": 47,
+    "name": "concurrent-4x100mb",
+    "tool": "bytehaul-4x",
+    "file": "4x100MB",
+    "seconds": 6.37,
+    "size_mb": 400,
+    "speed_mbps": 62.76
+  },
+  {
+    "experiment": 48,
+    "name": "concurrent-4x100mb",
+    "tool": "scp-4x",
+    "file": "4x100MB",
+    "seconds": 6.3,
+    "size_mb": 400,
+    "speed_mbps": 63.46
+  },
+  {
+    "experiment": 49,
+    "name": "resume-1gb-after-5s",
+    "tool": "bytehaul-resume",
+    "file": "1GB-partial",
+    "seconds": 6.61,
+    "size_mb": 1024,
+    "speed_mbps": 155.01
+  },
+  {
+    "experiment": 50,
+    "name": "max-throughput-2gb",
+    "tool": "bytehaul",
+    "file": "2GB",
+    "seconds": 6.9,
+    "size_mb": 2048,
+    "speed_mbps": 296.81
+  }
+]
