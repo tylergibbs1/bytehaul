@@ -3,8 +3,10 @@
 //! This crate provides the wire protocol, QUIC transport layer, chunking
 //! strategy, transfer manifest, resume state management, integrity
 //! verification, congestion control, and the sender/receiver transfer engines.
+pub mod adaptive;
 pub mod chunking;
 pub mod compress;
+pub mod fec;
 pub mod filter;
 pub mod congestion;
 pub mod crypto;
