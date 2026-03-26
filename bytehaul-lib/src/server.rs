@@ -49,7 +49,7 @@ impl Server {
     pub async fn accept_transfer(
         &self,
         progress_cb: Option<Box<dyn Fn(TransferProgress) + Send + Sync>>,
-    ) -> Result<PathBuf> {
+    ) -> Result<Vec<PathBuf>> {
         let conn = self
             .quic_server
             .accept()
@@ -63,6 +63,8 @@ impl Server {
             resume_enabled: self.config.resume,
             state_dir: self.config.state_dir.clone(),
             overwrite_mode: self.config.overwrite_mode,
+            delta_enabled: self.config.delta,
+            encrypt_state: self.config.encrypt_state,
             ..Default::default()
         };
 
@@ -73,7 +75,7 @@ impl Server {
         }
 
         receiver
-            .receive_file(&conn, &self.dest_dir)
+            .receive_transfer(&conn, &self.dest_dir)
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
@@ -92,8 +94,8 @@ impl Server {
             tokio::select! {
                 result = self.accept_transfer(None) => {
                     match result {
-                        Ok(path) => {
-                            info!("Transfer complete: {}", path.display());
+                        Ok(paths) => {
+                            info!("Transfer complete: {} files", paths.len());
                         }
                         Err(e) => {
                             tracing::error!("Transfer failed: {}", e);
@@ -111,7 +113,7 @@ impl Server {
 
     /// Run in ephemeral mode: accept one transfer, then exit.
     /// Prints the ready address to stdout for SSH bootstrapping.
-    pub async fn run_ephemeral(&self) -> Result<PathBuf> {
+    pub async fn run_ephemeral(&self) -> Result<Vec<PathBuf>> {
         println!("BYTEHAUL_READY {}", self.quic_server.local_addr());
         self.accept_transfer(None).await
     }

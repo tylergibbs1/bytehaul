@@ -40,6 +40,14 @@ pub struct SendArgs {
     /// Connect to a running daemon instead of SSH bootstrap
     #[arg(long)]
     pub daemon: Option<String>,
+
+    /// Send directory recursively
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
+
+    /// Delta transfer: only send changed blocks
+    #[arg(long)]
+    pub delta: bool,
 }
 
 pub async fn run(args: SendArgs) -> Result<()> {
@@ -48,7 +56,23 @@ pub async fn run(args: SendArgs) -> Result<()> {
         anyhow::bail!("Source file not found: {}", source.display());
     }
 
-    let file_size = tokio::fs::metadata(&source).await?.len();
+    let is_dir = source.is_dir();
+    if is_dir && !args.recursive {
+        anyhow::bail!("Source is a directory. Use -r/--recursive to send directories.");
+    }
+
+    let file_size = if is_dir {
+        // Walk dir to get total size for progress bar
+        let mut total = 0u64;
+        for entry in walkdir::WalkDir::new(&source).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+        total
+    } else {
+        tokio::fs::metadata(&source).await?.len()
+    };
 
     // Parse destination: in daemon mode, destination is just a remote path;
     // in SSH mode, it's user@host:/path
@@ -75,7 +99,7 @@ pub async fn run(args: SendArgs) -> Result<()> {
         config = config.max_bandwidth_mbps(mbps);
     }
 
-    let config = config.build();
+    let config = config.delta(args.delta).build();
 
     // Connect
     let client = if let Some(ref daemon_addr) = args.daemon {
@@ -114,7 +138,11 @@ pub async fn run(args: SendArgs) -> Result<()> {
     let source_str = source
         .to_str()
         .context("source path contains invalid UTF-8")?;
-    let mut transfer = client.send_file(source_str, &remote_path).await?;
+    let mut transfer = if is_dir {
+        client.send_directory(source_str, &remote_path).await?
+    } else {
+        client.send_file(source_str, &remote_path).await?
+    };
 
     let pb_clone = pb.clone();
     transfer.on_progress(move |p| {

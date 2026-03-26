@@ -84,33 +84,57 @@ impl Client {
         self
     }
 
-    /// Send a single file to the remote.
-    pub async fn send_file(&self, local_path: &str, remote_path: &str) -> Result<Transfer> {
-        let engine_config = EngineConfig {
+    fn make_engine_config(&self) -> EngineConfig {
+        EngineConfig {
             max_parallel_streams: self.config.max_parallel_streams,
             block_size: self.config.block_size,
             resume_enabled: self.config.resume,
             state_dir: self.config.state_dir.clone(),
             overwrite_mode: self.config.overwrite_mode,
+            delta_enabled: self.config.delta,
+            encrypt_state: self.config.encrypt_state,
             ..Default::default()
-        };
+        }
+    }
 
+    /// Send a single file to the remote.
+    pub async fn send_file(&self, local_path: &str, remote_path: &str) -> Result<Transfer> {
         Ok(Transfer {
             conn: self.conn.clone(),
-            config: engine_config,
-            local_path: local_path.to_string(),
-            remote_path: remote_path.to_string(),
+            config: self.make_engine_config(),
+            source: TransferSource::File {
+                local_path: local_path.to_string(),
+                remote_path: remote_path.to_string(),
+            },
             progress_cb: None,
         })
     }
+
+    /// Send an entire directory to the remote.
+    pub async fn send_directory(&self, local_dir: &str, remote_dir: &str) -> Result<Transfer> {
+        Ok(Transfer {
+            conn: self.conn.clone(),
+            config: self.make_engine_config(),
+            source: TransferSource::Directory {
+                local_dir: local_dir.to_string(),
+                remote_dir: remote_dir.to_string(),
+            },
+            progress_cb: None,
+        })
+    }
+}
+
+/// What to transfer.
+enum TransferSource {
+    File { local_path: String, remote_path: String },
+    Directory { local_dir: String, remote_dir: String },
 }
 
 /// A prepared transfer that can be observed and awaited.
 pub struct Transfer {
     conn: Arc<QuicConnection>,
     config: EngineConfig,
-    local_path: String,
-    remote_path: String,
+    source: TransferSource,
     progress_cb: Option<Box<dyn Fn(TransferProgress) + Send + Sync>>,
 }
 
@@ -126,14 +150,20 @@ impl Transfer {
         if let Some(cb) = self.progress_cb {
             sender.set_progress_callback(cb);
         }
-        sender
-            .send_file(
-                &self.conn,
-                Path::new(&self.local_path),
-                &self.remote_path,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
+        match self.source {
+            TransferSource::File { local_path, remote_path } => {
+                sender
+                    .send_file(&self.conn, Path::new(&local_path), &remote_path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            }
+            TransferSource::Directory { local_dir, remote_dir } => {
+                sender
+                    .send_directory(&self.conn, Path::new(&local_dir), &remote_dir)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            }
+        }
     }
 }
 

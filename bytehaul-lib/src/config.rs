@@ -14,6 +14,8 @@ pub struct TransferConfig {
     pub max_parallel_streams: usize,
     pub state_dir: Option<PathBuf>,
     pub overwrite_mode: OverwriteMode,
+    pub delta: bool,
+    pub encrypt_state: bool,
 }
 
 impl Default for TransferConfig {
@@ -26,6 +28,8 @@ impl Default for TransferConfig {
             max_parallel_streams: 16,
             state_dir: None,
             overwrite_mode: OverwriteMode::default(),
+            delta: false,
+            encrypt_state: false,
         }
     }
 }
@@ -80,6 +84,16 @@ impl TransferConfigBuilder {
 
     pub fn overwrite_mode(mut self, mode: OverwriteMode) -> Self {
         self.config.overwrite_mode = mode;
+        self
+    }
+
+    pub fn delta(mut self, enabled: bool) -> Self {
+        self.config.delta = enabled;
+        self
+    }
+
+    pub fn encrypt_state(mut self, enabled: bool) -> Self {
+        self.config.encrypt_state = enabled;
         self
     }
 

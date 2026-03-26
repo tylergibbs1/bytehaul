@@ -157,6 +157,10 @@ pub struct EngineConfig {
     pub progress_interval_chunks: u64,
     /// How to handle existing destination files.
     pub overwrite_mode: OverwriteMode,
+    /// Whether delta transfers are enabled (only send changed blocks).
+    pub delta_enabled: bool,
+    /// Whether to encrypt transfer state files at rest.
+    pub encrypt_state: bool,
 }
 
 impl Default for EngineConfig {
@@ -168,6 +172,8 @@ impl Default for EngineConfig {
             state_dir: None,
             progress_interval_chunks: 64,
             overwrite_mode: OverwriteMode::default(),
+            delta_enabled: false,
+            encrypt_state: false,
         }
     }
 }
@@ -222,6 +228,7 @@ impl Sender {
                 dest_path: PathBuf::from(remote_dest),
                 size: file_size,
                 blake3_hash: file_hash,
+                relative_path: None,
             }],
             self.config.block_size,
         )?;
@@ -446,6 +453,287 @@ impl Sender {
         );
 
         Ok(())
+    }
+
+    /// Send a pre-built manifest (supports multi-file transfers).
+    ///
+    /// The manifest must already contain file entries with valid source paths
+    /// and BLAKE3 hashes. Use `TransferManifest::from_directory` or
+    /// `TransferManifest::from_paths` to build one.
+    pub async fn send_transfer(
+        &self,
+        conn: &QuicConnection,
+        manifest: &TransferManifest,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
+        let total_size = manifest.total_size();
+        let total_chunks = manifest.total_blocks();
+
+        info!(
+            "Transfer {}: {} files, {} bytes, {} blocks",
+            &manifest.transfer_id[..12],
+            manifest.files.len(),
+            total_size,
+            total_chunks
+        );
+
+        // 1. Open control stream and send manifest
+        let (mut ctrl_send, mut ctrl_recv) = conn.open_control_stream().await?;
+        let manifest_bytes = bincode::serialize(manifest)?;
+        wire::write_control_message(
+            &mut ctrl_send,
+            &ControlMessage::Manifest { manifest_bytes },
+        )
+        .await?;
+
+        // 2. Wait for resume state
+        let resume_msg = wire::read_control_message(&mut ctrl_recv).await?;
+        let received_blocks: Vec<u64> = match resume_msg {
+            ControlMessage::ResumeState { blocks_received } => blocks_received,
+            ControlMessage::Error { code, message } => {
+                return Err(EngineError::RemoteError { code, message });
+            }
+            _ => {
+                return Err(EngineError::Protocol(
+                    "expected ResumeState message".into(),
+                ));
+            }
+        };
+
+        let mut bitfield = bitvec![0; total_chunks as usize];
+        for idx in &received_blocks {
+            if (*idx as usize) < bitfield.len() {
+                bitfield.set(*idx as usize, true);
+            }
+        }
+
+        // 3. Delta negotiation (if enabled)
+        if self.config.delta_enabled {
+            for (file_idx, _file) in manifest.files.iter().enumerate() {
+                wire::write_control_message(
+                    &mut ctrl_send,
+                    &ControlMessage::DeltaRequest { file_index: file_idx },
+                )
+                .await?;
+
+                let delta_resp = wire::read_control_message(&mut ctrl_recv).await?;
+                match delta_resp {
+                    ControlMessage::DeltaSignatures { file_index, signatures } => {
+                        if file_index != file_idx {
+                            continue;
+                        }
+                        // Compare source blocks against destination signatures
+                        let (start_block, _) = manifest.block_range_for_file(file_idx)?;
+                        let plan = crate::delta::compute_delta(
+                            &manifest.files[file_idx].source_path,
+                            &signatures,
+                            manifest.block_size,
+                            start_block,
+                        )
+                        .await?;
+
+                        // Mark matching blocks as already received
+                        for idx in &plan.matching_blocks {
+                            if (*idx as usize) < bitfield.len() {
+                                bitfield.set(*idx as usize, true);
+                            }
+                        }
+
+                        if !plan.matching_blocks.is_empty() {
+                            info!(
+                                "Delta: file {} - {}/{} blocks match ({:.0}% savings)",
+                                file_idx,
+                                plan.matching_blocks.len(),
+                                plan.total_blocks,
+                                plan.skip_ratio() * 100.0
+                            );
+                        }
+                    }
+                    ControlMessage::DeltaNotAvailable { .. } => {
+                        debug!("File {} not available at destination, full transfer", file_idx);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 4. Build chunk plan for all files
+        let already_received = bitfield.count_ones() as u64;
+        if already_received > 0 {
+            info!("Skipping {}/{} chunks (resume + delta)", already_received, total_chunks);
+        }
+
+        // We need a unified chunk plan that maps global indices to file+offset
+        let chunk_plan = ChunkPlan::new(total_size, self.config.block_size);
+        let mut scheduler = ChunkScheduler::new(chunk_plan, bitfield);
+
+        if scheduler.is_complete() {
+            let manifest_hash = manifest.manifest_hash();
+            wire::write_control_message(
+                &mut ctrl_send,
+                &ControlMessage::TransferComplete { file_blake3: manifest_hash },
+            )
+            .await?;
+            return Ok(());
+        }
+
+        // 5. Send chunks in parallel
+        let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_streams));
+        let mut sent_count = already_received;
+        let transfer_id_bytes =
+            verify::hex_to_hash(&manifest.transfer_id).unwrap_or([0u8; 32]);
+
+        while !scheduler.is_complete() {
+            let batch = scheduler.next_batch(self.config.max_parallel_streams);
+            if batch.is_empty() {
+                break;
+            }
+
+            let mut handles = Vec::new();
+
+            for chunk_idx in batch {
+                let permit = semaphore.clone().acquire_owned().await?;
+
+                // Resolve global chunk index to file + local offset
+                let (file_idx, local_offset) = match manifest.file_and_offset_for_block(chunk_idx) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let source_path = manifest.files[file_idx].source_path.clone();
+                let file_size = manifest.files[file_idx].size;
+                let remaining = file_size - local_offset;
+                let chunk_size = remaining.min(self.config.block_size as u64) as u32;
+
+                let conn_inner = conn.inner().clone();
+                let tid = transfer_id_bytes;
+
+                let handle = tokio::spawn(async move {
+                    let _permit = permit;
+
+                    let data = ChunkReader::read_chunk(&source_path, local_offset, chunk_size).await?;
+                    let chunk_hash = verify::hash_bytes(&data);
+
+                    let (mut send, _recv) = conn_inner.open_bi().await.map_err(|e| {
+                        EngineError::Protocol(format!("failed to open data stream: {e}"))
+                    })?;
+
+                    let header = ChunkHeader {
+                        transfer_id: tid,
+                        chunk_index: chunk_idx,
+                        chunk_size,
+                        chunk_blake3: chunk_hash,
+                    };
+
+                    wire::write_chunk_header(&mut send, &header).await?;
+                    wire::write_chunk_data(&mut send, &data).await?;
+                    send.finish().map_err(|e| {
+                        EngineError::Protocol(format!("failed to finish stream: {e}"))
+                    })?;
+
+                    debug!("Sent chunk {} ({} bytes)", chunk_idx, chunk_size);
+                    Ok::<u64, EngineError>(chunk_idx)
+                });
+
+                handles.push(handle);
+            }
+
+            for handle in handles {
+                match handle.await? {
+                    Ok(idx) => {
+                        scheduler.mark_received(idx);
+                        sent_count += 1;
+
+                        if let Some(ref cb) = self.progress_cb {
+                            if sent_count.is_multiple_of(self.config.progress_interval_chunks)
+                                || scheduler.is_complete()
+                            {
+                                let elapsed = start.elapsed().as_secs_f64();
+                                let transferred =
+                                    (sent_count * self.config.block_size as u64).min(total_size);
+                                cb(TransferProgress {
+                                    transferred_bytes: transferred,
+                                    total_bytes: total_size,
+                                    transferred_chunks: sent_count,
+                                    total_chunks,
+                                    speed_bytes_per_sec: if elapsed > 0.0 {
+                                        transferred as f64 / elapsed
+                                    } else {
+                                        0.0
+                                    },
+                                    elapsed_secs: elapsed,
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to send chunk: {}", e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        // 6. Wait for receiver confirmation
+        let manifest_hash = manifest.manifest_hash();
+        loop {
+            let msg = wire::read_control_message(&mut ctrl_recv).await?;
+            match msg {
+                ControlMessage::ProgressAck { .. } => continue,
+                ControlMessage::TransferComplete { file_blake3 } => {
+                    if file_blake3 == manifest_hash {
+                        info!("Transfer complete and verified by receiver");
+                    } else {
+                        return Err(EngineError::HashMismatch(
+                            "manifest hash mismatch on receiver side".into(),
+                        ));
+                    }
+                    break;
+                }
+                ControlMessage::Error { code, message } => {
+                    return Err(EngineError::RemoteError { code, message });
+                }
+                _ => {}
+            }
+        }
+
+        wire::write_control_message(
+            &mut ctrl_send,
+            &ControlMessage::TransferComplete { file_blake3: manifest_hash },
+        )
+        .await?;
+
+        let elapsed = start.elapsed();
+        info!(
+            "Transfer complete: {} files, {} bytes in {:.1}s ({:.1} MB/s)",
+            manifest.files.len(),
+            total_size,
+            elapsed.as_secs_f64(),
+            if elapsed.as_secs_f64() > 0.0 {
+                (total_size as f64 / elapsed.as_secs_f64()) / (1024.0 * 1024.0)
+            } else {
+                0.0
+            }
+        );
+
+        Ok(())
+    }
+
+    /// Send an entire directory over the given QUIC connection.
+    pub async fn send_directory(
+        &self,
+        conn: &QuicConnection,
+        local_dir: &Path,
+        remote_dest: &str,
+    ) -> Result<()> {
+        info!("Scanning directory: {}", local_dir.display());
+        let manifest = TransferManifest::from_directory(
+            local_dir,
+            Path::new(remote_dest),
+            self.config.block_size,
+        )
+        .await?;
+        info!("Found {} files, {} total", manifest.files.len(), manifest.total_size());
+        self.send_transfer(conn, &manifest).await
     }
 }
 
@@ -783,6 +1071,312 @@ impl Receiver {
 
         ack_batch.clear();
         Ok(())
+    }
+
+    /// Receive a multi-file transfer over the given QUIC connection.
+    ///
+    /// Returns the list of all received file paths.
+    pub async fn receive_transfer(
+        &self,
+        conn: &QuicConnection,
+        dest_dir: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        let start = std::time::Instant::now();
+
+        // 1. Accept control stream and read manifest
+        let (mut ctrl_send, mut ctrl_recv) = conn.accept_control_stream().await?;
+
+        let manifest_msg = wire::read_control_message(&mut ctrl_recv).await?;
+        let manifest: TransferManifest = match manifest_msg {
+            ControlMessage::Manifest { manifest_bytes } => bincode::deserialize(&manifest_bytes)?,
+            _ => return Err(EngineError::Protocol("expected Manifest message".into())),
+        };
+
+        if manifest.files.is_empty() {
+            return Err(EngineError::Protocol("empty manifest".into()));
+        }
+
+        // Wait for TLS handshake
+        if conn.inner().handshake_data().is_none() {
+            return Err(EngineError::Protocol("TLS handshake not yet available".into()));
+        }
+
+        let total_chunks = manifest.total_blocks();
+        let total_size = manifest.total_size();
+        let block_size = manifest.block_size;
+
+        // 2. Resolve destination paths for all files
+        let mut dest_paths = Vec::with_capacity(manifest.files.len());
+        for file_entry in &manifest.files {
+            let rel = file_entry
+                .relative_path
+                .as_deref()
+                .or_else(|| file_entry.dest_path.file_name().map(Path::new))
+                .unwrap_or(Path::new("received_file"));
+            let dest_path = dest_dir.join(rel);
+            validate_path(&dest_path, dest_dir)?;
+            let dest_path = resolve_dest_path(&dest_path, self.config.overwrite_mode)?;
+            dest_paths.push(dest_path);
+        }
+
+        info!(
+            "Receiving: {} files, {} bytes, {} blocks",
+            manifest.files.len(),
+            total_size,
+            total_chunks
+        );
+
+        // 3. Check for resume state
+        let mut state = match self.state_manager.load(&manifest.transfer_id)? {
+            Some(existing) => {
+                info!(
+                    "Resuming transfer: {}/{} chunks",
+                    existing.received_count(),
+                    total_chunks
+                );
+                existing
+            }
+            None => {
+                // Create all destination directories and pre-allocate files
+                for (i, dest_path) in dest_paths.iter().enumerate() {
+                    if let Some(parent) = dest_path.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    let file = tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(dest_path)
+                        .await?;
+                    if manifest.files[i].size > 0 {
+                        file.set_len(manifest.files[i].size).await?;
+                    }
+                }
+
+                TransferState::new(
+                    manifest.transfer_id.clone(),
+                    dest_paths
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    total_size,
+                    block_size,
+                    total_chunks,
+                    verify::hash_to_hex(&manifest.manifest_hash()),
+                )
+            }
+        };
+
+        // 4. Send resume state
+        wire::write_control_message(
+            &mut ctrl_send,
+            &ControlMessage::ResumeState {
+                blocks_received: state.blocks_received.clone(),
+            },
+        )
+        .await?;
+
+        // 5. Handle delta requests (if sender asks)
+        // Process delta messages until we get a non-delta message or chunks start
+        loop {
+            // Peek: if sender sends delta requests, respond; otherwise break
+            let msg = wire::read_control_message(&mut ctrl_recv).await;
+            match msg {
+                Ok(ControlMessage::DeltaRequest { file_index }) => {
+                    if file_index < dest_paths.len() && dest_paths[file_index].exists() {
+                        let sigs = crate::delta::compute_signatures(
+                            &dest_paths[file_index],
+                            block_size,
+                        )
+                        .await
+                        .unwrap_or_default();
+
+                        // If delta, receiver also needs to copy matching blocks
+                        // into the new file from the old version
+                        wire::write_control_message(
+                            &mut ctrl_send,
+                            &ControlMessage::DeltaSignatures {
+                                file_index,
+                                signatures: sigs,
+                            },
+                        )
+                        .await?;
+                    } else {
+                        wire::write_control_message(
+                            &mut ctrl_send,
+                            &ControlMessage::DeltaNotAvailable { file_index },
+                        )
+                        .await?;
+                    }
+                }
+                Ok(other) => {
+                    // Not a delta message — this must be something else (e.g., the sender
+                    // started sending chunks). We need to handle it in the chunk loop.
+                    // For now, if it's a TransferComplete (all matched), handle it.
+                    if let ControlMessage::TransferComplete { file_blake3 } = other {
+                        let manifest_hash = manifest.manifest_hash();
+                        if file_blake3 == manifest_hash {
+                            info!("All blocks matched via delta, nothing to transfer");
+                            wire::write_control_message(
+                                &mut ctrl_send,
+                                &ControlMessage::TransferComplete { file_blake3: manifest_hash },
+                            )
+                            .await?;
+                            self.state_manager.delete(&manifest.transfer_id)?;
+                            return Ok(dest_paths);
+                        }
+                    }
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        // 6. Receive chunks
+        if state.received_count() < total_chunks {
+            let mut ack_batch = Vec::new();
+            let mut set = JoinSet::new();
+
+            loop {
+                if state.received_count() >= total_chunks {
+                    while let Some(result) = set.join_next().await {
+                        self.handle_chunk_result(result, &mut state, &mut ack_batch);
+                    }
+                    break;
+                }
+
+                tokio::select! {
+                    result = conn.accept_data_stream() => {
+                        let (_send, mut recv) = result?;
+                        let manifest_ref = manifest.clone();
+                        let dest_paths_ref = dest_paths.clone();
+                        let bs = block_size;
+
+                        set.spawn(async move {
+                            let header = wire::read_chunk_header(&mut recv).await?;
+                            let data = wire::read_chunk_data(&mut recv, header.chunk_size).await?;
+
+                            if !verify::verify_chunk(&data, &header.chunk_blake3) {
+                                return Ok((header.chunk_index, false));
+                            }
+
+                            // Resolve global index to file + offset
+                            let (file_idx, local_offset) = match manifest_ref
+                                .file_and_offset_for_block(header.chunk_index)
+                            {
+                                Some(v) => v,
+                                None => return Ok((header.chunk_index, false)),
+                            };
+
+                            ChunkWriter::write_chunk(
+                                &dest_paths_ref[file_idx],
+                                local_offset,
+                                &data,
+                            )
+                            .await?;
+
+                            Ok::<(u64, bool), EngineError>((header.chunk_index, true))
+                        });
+                    }
+                    Some(result) = set.join_next() => {
+                        self.handle_chunk_result(result, &mut state, &mut ack_batch);
+
+                        if ack_batch.len() >= self.config.progress_interval_chunks as usize
+                            || state.received_count() == total_chunks
+                        {
+                            self.state_manager.save(&state)?;
+                            wire::write_control_message(
+                                &mut ctrl_send,
+                                &ControlMessage::ProgressAck {
+                                    blocks_confirmed: ack_batch.clone(),
+                                },
+                            )
+                            .await?;
+
+                            if let Some(ref cb) = self.progress_cb {
+                                let received = state.received_count();
+                                let transferred =
+                                    (received * block_size as u64).min(total_size);
+                                let elapsed = start.elapsed().as_secs_f64();
+                                cb(TransferProgress {
+                                    transferred_bytes: transferred,
+                                    total_bytes: total_size,
+                                    transferred_chunks: received,
+                                    total_chunks,
+                                    speed_bytes_per_sec: if elapsed > 0.0 {
+                                        transferred as f64 / elapsed
+                                    } else {
+                                        0.0
+                                    },
+                                    elapsed_secs: elapsed,
+                                });
+                            }
+
+                            ack_batch.clear();
+                        }
+                    }
+                }
+            }
+
+            if !ack_batch.is_empty() {
+                self.state_manager.save(&state)?;
+                wire::write_control_message(
+                    &mut ctrl_send,
+                    &ControlMessage::ProgressAck {
+                        blocks_confirmed: ack_batch,
+                    },
+                )
+                .await?;
+            }
+        }
+
+        // 7. Verify all files
+        info!("All chunks received, verifying file integrity...");
+        let mut all_hashes = Vec::new();
+        for (i, dest_path) in dest_paths.iter().enumerate() {
+            let hash = verify::hash_file(dest_path).await?;
+            if hash != manifest.files[i].blake3_hash {
+                return Err(EngineError::HashMismatch(format!(
+                    "file {} hash mismatch",
+                    dest_path.display()
+                )));
+            }
+            all_hashes.extend_from_slice(&hash);
+        }
+        let manifest_hash = verify::hash_bytes(&all_hashes);
+
+        // 8. Send completion
+        wire::write_control_message(
+            &mut ctrl_send,
+            &ControlMessage::TransferComplete {
+                file_blake3: manifest_hash,
+            },
+        )
+        .await?;
+
+        match wire::read_control_message(&mut ctrl_recv).await {
+            Ok(ControlMessage::TransferComplete { .. }) => {}
+            Ok(_) => warn!("Expected TransferComplete from sender"),
+            Err(e) => debug!("Control stream closed before sender confirmation: {}", e),
+        }
+
+        self.state_manager.delete(&manifest.transfer_id)?;
+
+        let elapsed = start.elapsed();
+        info!(
+            "Receive complete: {} files, {} bytes in {:.1}s ({:.1} MB/s)",
+            manifest.files.len(),
+            total_size,
+            elapsed.as_secs_f64(),
+            if elapsed.as_secs_f64() > 0.0 {
+                (total_size as f64 / elapsed.as_secs_f64()) / (1024.0 * 1024.0)
+            } else {
+                0.0
+            }
+        );
+
+        Ok(dest_paths)
     }
 }
 

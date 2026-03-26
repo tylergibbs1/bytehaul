@@ -235,6 +235,7 @@ async fn test_resume_transfer() {
             dest_path: std::path::PathBuf::from("resume.bin"),
             size: file_size as u64,
             blake3_hash: source_hash,
+            relative_path: None,
         }],
         block_size,
     )

@@ -31,8 +31,8 @@ pub const CHUNK_HEADER_SIZE: usize = 76;
 /// describe many thousands of files.
 pub const MAX_CONTROL_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
-/// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 1;
+/// Current protocol version (v2 adds delta transfer messages).
+pub const PROTOCOL_VERSION: u8 = 2;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -109,6 +109,28 @@ pub enum ControlMessage {
 
     /// Request graceful cancellation of the current transfer.
     Cancel,
+
+    // ── Delta transfer messages (v2) ────────────────────────
+
+    /// Sender asks receiver for block signatures of an existing file.
+    DeltaRequest {
+        /// Index of the file in the manifest.
+        file_index: usize,
+    },
+
+    /// Receiver sends block-level BLAKE3 signatures for delta comparison.
+    DeltaSignatures {
+        /// Index of the file in the manifest.
+        file_index: usize,
+        /// Per-block BLAKE3 hashes of the existing destination file.
+        signatures: Vec<crate::delta::BlockSignature>,
+    },
+
+    /// Receiver indicates the file does not exist (full transfer needed).
+    DeltaNotAvailable {
+        /// Index of the file in the manifest.
+        file_index: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------

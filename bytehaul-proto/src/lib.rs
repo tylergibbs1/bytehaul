@@ -5,6 +5,8 @@
 //! verification, congestion control, and the sender/receiver transfer engines.
 pub mod chunking;
 pub mod congestion;
+pub mod crypto;
+pub mod delta;
 pub mod engine;
 pub mod manifest;
 pub mod resume;
