@@ -30,7 +30,7 @@ pub struct SendArgs {
     pub max_rate: Option<String>,
 
     /// Block size in MB
-    #[arg(long, default_value = "4")]
+    #[arg(long, default_value = "16")]
     pub block_size: u32,
 
     /// Number of parallel streams

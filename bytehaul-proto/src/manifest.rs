@@ -15,8 +15,11 @@ use tokio::io::AsyncReadExt;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Default block size: 4 MiB.
-pub const DEFAULT_BLOCK_SIZE: u32 = 4 * 1024 * 1024;
+/// Default block size: 16 MiB.
+///
+/// Benchmarks show 16 MB blocks give ~35% higher throughput than 4 MB
+/// on high-BDP links (54 MB/s vs 40 MB/s at 1 GB over 85ms RTT).
+pub const DEFAULT_BLOCK_SIZE: u32 = 16 * 1024 * 1024;
 
 /// Minimum allowed block size: 256 KiB.
 pub const MIN_BLOCK_SIZE: u32 = 256 * 1024;

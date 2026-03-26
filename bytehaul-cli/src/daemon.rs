@@ -60,8 +60,11 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         tokio::fs::create_dir_all(&dest_dir).await?;
     }
 
+    // Daemon mode defaults to aggressive congestion — users explicitly
+    // chose to run ByteHaul, so they want maximum throughput.
     let config = TransferConfig {
         overwrite_mode: args.overwrite.into(),
+        congestion: bytehaul_proto::congestion::CongestionMode::Aggressive,
         ..Default::default()
     };
 

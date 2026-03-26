@@ -67,6 +67,23 @@ pub type Result<T> = std::result::Result<T, TransportError>;
 // Configuration
 // ---------------------------------------------------------------------------
 
+/// Which congestion controller to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CongestionAlgo {
+    /// BBR: best for clean, high-BDP links. Fast ramp-up but aggressive
+    /// backoff under loss.
+    Bbr,
+    /// Cubic (RFC 8312): more resilient to packet loss. Better for lossy
+    /// or contested links (cellular, satellite, shared WiFi).
+    Cubic,
+}
+
+impl Default for CongestionAlgo {
+    fn default() -> Self {
+        Self::Bbr
+    }
+}
+
 /// Parameters that govern a QUIC endpoint.
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
@@ -82,6 +99,9 @@ pub struct TransportConfig {
     /// Connection idle timeout. The connection is closed if no data or
     /// keep-alive is exchanged within this window.
     pub idle_timeout: Duration,
+
+    /// Congestion control algorithm. BBR for clean links, Cubic for lossy.
+    pub congestion_algo: CongestionAlgo,
 }
 
 impl Default for TransportConfig {
@@ -91,6 +111,7 @@ impl Default for TransportConfig {
             max_concurrent_streams: 16,
             keep_alive_interval: None,
             idle_timeout: Duration::from_secs(30),
+            congestion_algo: CongestionAlgo::default(),
         }
     }
 }
@@ -114,14 +135,18 @@ impl TransportConfig {
                 .map_err(|_| TransportError::IdleTimeoutTooLarge)?,
         ));
 
-        // ── Bulk transfer optimizations ──
-        //
-        // Use BBR congestion control with a large initial window.
-        // BBR is designed for high-BDP networks and avoids the slow ramp-up
-        // that makes Cubic/NewReno take seconds to reach full throughput.
-        let mut bbr = quinn::congestion::BbrConfig::default();
-        bbr.initial_window(128 * 1024); // 128 KB initial window (vs default ~14 KB)
-        transport.congestion_controller_factory(Arc::new(bbr));
+        // ── Congestion control ──
+        match self.congestion_algo {
+            CongestionAlgo::Bbr => {
+                let mut bbr = quinn::congestion::BbrConfig::default();
+                bbr.initial_window(128 * 1024); // 128 KB (vs default ~14 KB)
+                transport.congestion_controller_factory(Arc::new(bbr));
+            }
+            CongestionAlgo::Cubic => {
+                let cubic = quinn::congestion::CubicConfig::default();
+                transport.congestion_controller_factory(Arc::new(cubic));
+            }
+        }
 
         // Large send/receive windows to sustain throughput on high-RTT links.
         // At 1 Gbps and 200ms RTT, BDP = 25 MB. We set connection-level
