@@ -12,6 +12,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::chunking::{ChunkPlan, ChunkReader, ChunkScheduler, ChunkWriter};
+use crate::congestion::BandwidthLimiter;
 use crate::manifest::{FileEntry, TransferManifest};
 use crate::resume::{StateManager, TransferState};
 use crate::transport::QuicConnection;
@@ -161,6 +162,8 @@ pub struct EngineConfig {
     pub delta_enabled: bool,
     /// Whether to encrypt transfer state files at rest.
     pub encrypt_state: bool,
+    /// Maximum bandwidth in bytes per second (0 = unlimited).
+    pub max_bandwidth_bps: u64,
 }
 
 impl Default for EngineConfig {
@@ -174,6 +177,7 @@ impl Default for EngineConfig {
             overwrite_mode: OverwriteMode::default(),
             delta_enabled: false,
             encrypt_state: false,
+            max_bandwidth_bps: 0,
         }
     }
 }
@@ -300,6 +304,7 @@ impl Sender {
         // 4. Send chunks in parallel batches
         let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_streams));
         let mut sent_count = already_received;
+        let mut rate_limiter = BandwidthLimiter::new(self.config.max_bandwidth_bps);
 
         let local_path = local_path.to_path_buf();
         let transfer_id_bytes =
@@ -314,6 +319,9 @@ impl Sender {
             let mut handles = Vec::new();
 
             for chunk_idx in batch {
+                // Apply bandwidth limiting before sending each chunk
+                rate_limiter.wait_if_needed(self.config.block_size as u64).await;
+
                 let permit = semaphore.clone().acquire_owned().await?;
                 let chunk_meta = chunk_plan.chunk_meta(chunk_idx);
                 let local_path = local_path.clone();
@@ -580,6 +588,7 @@ impl Sender {
         // 5. Send chunks in parallel
         let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_streams));
         let mut sent_count = already_received;
+        let mut rate_limiter = BandwidthLimiter::new(self.config.max_bandwidth_bps);
         let transfer_id_bytes =
             verify::hex_to_hash(&manifest.transfer_id).unwrap_or([0u8; 32]);
 
@@ -592,6 +601,7 @@ impl Sender {
             let mut handles = Vec::new();
 
             for chunk_idx in batch {
+                rate_limiter.wait_if_needed(self.config.block_size as u64).await;
                 let permit = semaphore.clone().acquire_owned().await?;
 
                 // Resolve global chunk index to file + local offset
@@ -1178,10 +1188,17 @@ impl Receiver {
         .await?;
 
         // 5. Handle delta requests (if sender asks)
-        // Process delta messages until we get a non-delta message or chunks start
+        // Use a short timeout: if no delta request arrives within 100ms,
+        // the sender isn't using delta and we proceed to chunk receiving.
         loop {
-            // Peek: if sender sends delta requests, respond; otherwise break
-            let msg = wire::read_control_message(&mut ctrl_recv).await;
+            let msg = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                wire::read_control_message(&mut ctrl_recv),
+            ).await;
+            let msg = match msg {
+                Ok(msg) => msg,
+                Err(_) => break, // Timeout — no delta, proceed to chunks
+            };
             match msg {
                 Ok(ControlMessage::DeltaRequest { file_index }) => {
                     if file_index < dest_paths.len() && dest_paths[file_index].exists() {

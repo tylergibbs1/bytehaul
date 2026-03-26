@@ -93,6 +93,9 @@ impl Client {
             overwrite_mode: self.config.overwrite_mode,
             delta_enabled: self.config.delta,
             encrypt_state: self.config.encrypt_state,
+            max_bandwidth_bps: self.config.max_bandwidth_mbps
+                .map(|mbps| mbps * 1_000_000 / 8)
+                .unwrap_or(0),
             ..Default::default()
         }
     }

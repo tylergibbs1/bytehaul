@@ -90,7 +90,7 @@ impl Default for TransportConfig {
             bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
             max_concurrent_streams: 16,
             keep_alive_interval: None,
-            idle_timeout: Duration::from_secs(5),
+            idle_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -99,7 +99,11 @@ impl TransportConfig {
     /// Build the Quinn-level transport config from our settings.
     fn to_quinn_transport(&self) -> Result<quinn::TransportConfig> {
         let mut transport = quinn::TransportConfig::default();
-        transport.max_concurrent_bidi_streams(VarInt::from_u32(self.max_concurrent_streams));
+        // Allow enough concurrent streams for parallel chunk transfer + headroom.
+        // The sender opens one stream per in-flight chunk, so we need at least
+        // max_parallel_streams. Add headroom for control streams and overlap.
+        let stream_limit = self.max_concurrent_streams.max(64);
+        transport.max_concurrent_bidi_streams(VarInt::from_u32(stream_limit));
         transport.max_concurrent_uni_streams(VarInt::from_u32(0));
         if let Some(ka) = self.keep_alive_interval {
             transport.keep_alive_interval(Some(ka));
@@ -109,6 +113,23 @@ impl TransportConfig {
                 .try_into()
                 .map_err(|_| TransportError::IdleTimeoutTooLarge)?,
         ));
+
+        // ── Bulk transfer optimizations ──
+        //
+        // Use BBR congestion control with a large initial window.
+        // BBR is designed for high-BDP networks and avoids the slow ramp-up
+        // that makes Cubic/NewReno take seconds to reach full throughput.
+        let mut bbr = quinn::congestion::BbrConfig::default();
+        bbr.initial_window(128 * 1024); // 128 KB initial window (vs default ~14 KB)
+        transport.congestion_controller_factory(Arc::new(bbr));
+
+        // Large send/receive windows to sustain throughput on high-RTT links.
+        // At 1 Gbps and 200ms RTT, BDP = 25 MB. We set connection-level
+        // windows to 32 MB and per-stream windows to 8 MB.
+        transport.send_window(32 * 1024 * 1024);                            // 32 MB
+        transport.receive_window(VarInt::from_u32(32 * 1024 * 1024));       // 32 MB
+        transport.stream_receive_window(VarInt::from_u32(8 * 1024 * 1024)); // 8 MB per stream
+
         Ok(transport)
     }
 }
@@ -414,7 +435,7 @@ mod tests {
     fn default_transport_config_values() {
         let cfg = TransportConfig::default();
         assert_eq!(cfg.max_concurrent_streams, 16);
-        assert_eq!(cfg.idle_timeout, Duration::from_secs(5));
+        assert_eq!(cfg.idle_timeout, Duration::from_secs(30));
         assert!(cfg.keep_alive_interval.is_none());
     }
 
