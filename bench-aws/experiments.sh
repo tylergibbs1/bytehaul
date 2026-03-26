@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
+# Don't use -e: individual experiment failures should not kill the suite
 
 # ═══════════════════════════════════════════════════════════════
 # ByteHaul 50-Experiment Overnight Benchmark Suite
@@ -104,8 +105,8 @@ USERDATA='#!/bin/bash
 yum install -y gcc openssl-devel rsync bc'
 
 log "Launching instances..."
-INST_A=$(aws ec2 run-instances --image-id "$AMI_A" --instance-type "$INSTANCE_TYPE" --key-name "$KEY_NAME" --security-group-ids "$SG_A" --user-data "$USERDATA" --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=bh-exp-sender}]" --region "$REGION_A" --query 'Instances[0].InstanceId' --output text)
-INST_B=$(aws ec2 run-instances --image-id "$AMI_B" --instance-type "$INSTANCE_TYPE" --key-name "$KEY_NAME" --security-group-ids "$SG_B" --user-data "$USERDATA" --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=bh-exp-receiver}]" --region "$REGION_B" --query 'Instances[0].InstanceId' --output text)
+INST_A=$(aws ec2 run-instances --image-id "$AMI_A" --instance-type "$INSTANCE_TYPE" --key-name "$KEY_NAME" --security-group-ids "$SG_A" --user-data "$USERDATA" --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":30,"VolumeType":"gp3"}}]' --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=bh-exp-sender}]" --region "$REGION_A" --query 'Instances[0].InstanceId' --output text)
+INST_B=$(aws ec2 run-instances --image-id "$AMI_B" --instance-type "$INSTANCE_TYPE" --key-name "$KEY_NAME" --security-group-ids "$SG_B" --user-data "$USERDATA" --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":30,"VolumeType":"gp3"}}]' --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=bh-exp-receiver}]" --region "$REGION_B" --query 'Instances[0].InstanceId' --output text)
 
 aws ec2 wait instance-running --instance-ids "$INST_A" --region "$REGION_A"
 aws ec2 wait instance-running --instance-ids "$INST_B" --region "$REGION_B"
@@ -204,34 +205,22 @@ rsync_transfer() {
 }
 
 # Create test files on sender
-log "Creating test files..."
-run_on_sender "
-dd if=/dev/urandom of=/tmp/1mb.bin bs=1M count=1 2>/dev/null
-dd if=/dev/urandom of=/tmp/10mb.bin bs=1M count=10 2>/dev/null
-dd if=/dev/urandom of=/tmp/50mb.bin bs=1M count=50 2>/dev/null
-dd if=/dev/urandom of=/tmp/100mb.bin bs=1M count=100 2>/dev/null
-dd if=/dev/urandom of=/tmp/500mb.bin bs=1M count=500 2>/dev/null
-dd if=/dev/urandom of=/tmp/1gb.bin bs=1M count=1024 2>/dev/null
-dd if=/dev/urandom of=/tmp/5gb.bin bs=1M count=5120 2>/dev/null
+log "Creating test files (small)..."
+run_on_sender 'dd if=/dev/urandom of=/tmp/1mb.bin bs=1M count=1 2>/dev/null; dd if=/dev/urandom of=/tmp/10mb.bin bs=1M count=10 2>/dev/null; dd if=/dev/urandom of=/tmp/50mb.bin bs=1M count=50 2>/dev/null; dd if=/dev/urandom of=/tmp/100mb.bin bs=1M count=100 2>/dev/null; echo done' || log "WARN: small files failed"
 
-# Directory test files
-mkdir -p /tmp/dir10 /tmp/dir100 /tmp/dir1000 /tmp/dir10000
-for i in \$(seq 1 10); do dd if=/dev/urandom of=/tmp/dir10/f\$i.bin bs=1M count=10 2>/dev/null; done
-for i in \$(seq 1 100); do dd if=/dev/urandom of=/tmp/dir100/f\$i.bin bs=1M count=1 2>/dev/null; done
-for i in \$(seq 1 1000); do dd if=/dev/urandom of=/tmp/dir1000/f\$i.bin bs=102400 count=1 2>/dev/null; done
-mkdir -p /tmp/dir10000/sub{1,2,3,4,5,6,7,8,9,10}
-for d in /tmp/dir10000/sub*; do for i in \$(seq 1 1000); do dd if=/dev/urandom of=\$d/f\$i.bin bs=10240 count=1 2>/dev/null; done; done
+log "Creating test files (large)..."
+run_on_sender 'dd if=/dev/urandom of=/tmp/500mb.bin bs=1M count=500 2>/dev/null; dd if=/dev/urandom of=/tmp/1gb.bin bs=1M count=1024 2>/dev/null; dd if=/dev/urandom of=/tmp/2gb.bin bs=1M count=2048 2>/dev/null; echo done' || log "WARN: large files failed"
 
-# Deep nesting
-DIR=/tmp/deepnest
-for i in \$(seq 1 10); do DIR=\$DIR/level\$i; mkdir -p \$DIR; dd if=/dev/urandom of=\$DIR/data.bin bs=1M count=1 2>/dev/null; done
+log "Creating test dirs..."
+run_on_sender 'mkdir -p /tmp/dir10; for i in $(seq 1 10); do dd if=/dev/urandom of=/tmp/dir10/f$i.bin bs=1M count=10 2>/dev/null; done; echo done' || log "WARN: dir10 failed"
+run_on_sender 'mkdir -p /tmp/dir100; for i in $(seq 1 100); do dd if=/dev/urandom of=/tmp/dir100/f$i.bin bs=1M count=1 2>/dev/null; done; echo done' || log "WARN: dir100 failed"
+run_on_sender 'mkdir -p /tmp/dir1000; for i in $(seq 1 1000); do dd if=/dev/urandom of=/tmp/dir1000/f$i.bin bs=102400 count=1 2>/dev/null; done; echo done' || log "WARN: dir1000 failed"
+run_on_sender 'mkdir -p /tmp/dir5000/sub1 /tmp/dir5000/sub2 /tmp/dir5000/sub3 /tmp/dir5000/sub4 /tmp/dir5000/sub5; for d in /tmp/dir5000/sub*; do for i in $(seq 1 1000); do dd if=/dev/urandom of=$d/f$i.bin bs=10240 count=1 2>/dev/null; done; done; echo done' || log "WARN: dir5000 failed"
 
-# Mixed realistic dataset
-mkdir -p /tmp/mixed/logs /tmp/mixed/models /tmp/mixed/configs
-dd if=/dev/urandom of=/tmp/mixed/models/model.bin bs=1M count=50 2>/dev/null
-for i in \$(seq 1 100); do dd if=/dev/urandom of=/tmp/mixed/logs/log\$i.txt bs=10240 count=1 2>/dev/null; done
-for i in \$(seq 1 20); do dd if=/dev/urandom of=/tmp/mixed/configs/cfg\$i.yaml bs=1024 count=1 2>/dev/null; done
-"
+log "Creating special dirs..."
+run_on_sender 'D=/tmp/deepnest; for i in $(seq 1 10); do D=$D/level$i; mkdir -p $D; dd if=/dev/urandom of=$D/data.bin bs=1M count=1 2>/dev/null; done; echo done' || log "WARN: deepnest failed"
+run_on_sender 'mkdir -p /tmp/mixed/logs /tmp/mixed/models /tmp/mixed/configs; dd if=/dev/urandom of=/tmp/mixed/models/model.bin bs=1M count=50 2>/dev/null; for i in $(seq 1 100); do dd if=/dev/urandom of=/tmp/mixed/logs/log$i.txt bs=10240 count=1 2>/dev/null; done; for i in $(seq 1 20); do dd if=/dev/urandom of=/tmp/mixed/configs/cfg$i.yaml bs=1024 count=1 2>/dev/null; done; echo done' || log "WARN: mixed failed"
+
 log "Test files created."
 
 # ═══ Experiments 1-3: Shutdown fix verification ═══════════════
@@ -265,7 +254,7 @@ done
 log "═══ Experiments 16-23: File size scaling ═══"
 
 exp=16
-for spec in "1mb.bin:1" "10mb.bin:10" "50mb.bin:50" "100mb.bin:100" "500mb.bin:500" "1gb.bin:1024" "5gb.bin:5120"; do
+for spec in "1mb.bin:1" "10mb.bin:10" "50mb.bin:50" "100mb.bin:100" "500mb.bin:500" "1gb.bin:1024" "2gb.bin:2048"; do
     file="/tmp/$(echo $spec | cut -d: -f1)"
     mb=$(echo $spec | cut -d: -f2)
     T=$(bh_transfer "" "$file" "/bench.bin")
@@ -288,7 +277,7 @@ log "═══ Experiments 26-31: Directory patterns ═══"
 T=$(bh_transfer "-r" "/tmp/dir10" "/dir10"); record 26 "dir-10x10mb" "bytehaul" "10x10MB" "$T" 100
 T=$(bh_transfer "-r" "/tmp/dir100" "/dir100"); record 27 "dir-100x1mb" "bytehaul" "100x1MB" "$T" 100
 T=$(bh_transfer "-r" "/tmp/dir1000" "/dir1000"); record 28 "dir-1000x100kb" "bytehaul" "1000x100KB" "$T" 97
-T=$(bh_transfer "-r" "/tmp/dir10000" "/dir10000"); record 29 "dir-10000x10kb" "bytehaul" "10000x10KB" "$T" 97
+T=$(bh_transfer "-r" "/tmp/dir5000" "/dir5000"); record 29 "dir-5000x10kb" "bytehaul" "5000x10KB" "$T" 48
 
 T=$(bh_transfer "-r" "/tmp/deepnest" "/deepnest"); record 30 "dir-deep-10levels" "bytehaul" "10x1MB-nested" "$T" 10
 T=$(bh_transfer "-r" "/tmp/mixed" "/mixed"); record 31 "dir-mixed-realistic" "bytehaul" "mixed-51MB" "$T" 51
@@ -397,8 +386,8 @@ record 49 "resume-1gb-after-5s" "bytehaul-resume" "1GB-partial" "$T" 1024
 # ═══ Experiment 50: Maximum sustained throughput ═════════════
 log "═══ Experiment 50: Maximum throughput (5GB) ═══"
 
-T=$(bh_transfer "" "/tmp/5gb.bin" "/bench.bin")
-record 50 "max-throughput-5gb" "bytehaul" "5GB" "$T" 5120
+T=$(bh_transfer "" "/tmp/2gb.bin" "/bench.bin")
+record 50 "max-throughput-2gb" "bytehaul" "2GB" "$T" 2048
 
 # ═══ Summary ═════════════════════════════════════════════════
 log ""
