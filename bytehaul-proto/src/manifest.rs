@@ -45,8 +45,11 @@ pub enum ManifestError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("bincode serialization error: {0}")]
-    Bincode(#[from] bincode::Error),
+    #[error("bincode encode error: {0}")]
+    BincodeEncode(#[from] bincode::error::EncodeError),
+
+    #[error("bincode decode error: {0}")]
+    BincodeDecode(#[from] bincode::error::DecodeError),
 
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
@@ -176,12 +179,14 @@ impl TransferManifest {
     /// Serialize to a compact binary representation (bincode) suitable for the
     /// wire protocol.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(ManifestError::from)
+        bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(ManifestError::from)
     }
 
     /// Deserialize from bytes previously produced by [`to_bytes`](Self::to_bytes).
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        bincode::deserialize(data).map_err(ManifestError::from)
+        bincode::serde::decode_from_slice(data, bincode::config::standard())
+            .map(|(val, _len)| val)
+            .map_err(ManifestError::from)
     }
 
     /// Serialize to a pretty-printed JSON string (useful for logging/debug).

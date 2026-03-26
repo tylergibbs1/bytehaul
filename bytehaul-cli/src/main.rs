@@ -4,6 +4,7 @@ mod completions;
 mod daemon;
 mod init;
 pub mod output;
+mod pull;
 mod send;
 mod status;
 
@@ -21,6 +22,8 @@ use tracing_subscriber::EnvFilter;
                     bytehaul send ./data.bin user@remote:/path/\n  \
                     bytehaul send -r ./dataset/ user@remote:/data/\n  \
                     bytehaul send --daemon 10.0.0.5:7700 ./file.bin /dest\n  \
+                    bytehaul pull user@remote:/data/file.bin ./local/\n  \
+                    bytehaul pull -r user@remote:/dataset/ ./local/\n  \
                     bytehaul daemon --port 7700 --dest /data/incoming\n  \
                     bytehaul status\n  \
                     bytehaul clean --max-age 3d",
@@ -44,6 +47,9 @@ struct Cli {
 enum Commands {
     /// Send a file or directory to a remote host
     Send(send::SendArgs),
+
+    /// Pull a file or directory from a remote host
+    Pull(pull::PullArgs),
 
     /// Start a receiver daemon
     Daemon(daemon::DaemonArgs),
@@ -87,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Send(args) => send::run(args, cli.json).await,
+        Commands::Pull(args) => pull::run(args).await,
         Commands::Daemon(args) => daemon::run(args).await,
         Commands::Bench(args) => bench::run(args).await,
         Commands::Init(args) => init::run(args).await,

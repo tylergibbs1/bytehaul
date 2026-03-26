@@ -131,3 +131,93 @@ impl Reporter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reporter_from_flag() {
+        let human = Reporter::from_flag(false);
+        assert!(!human.is_json());
+        assert_eq!(human.mode(), OutputMode::Human);
+
+        let json = Reporter::from_flag(true);
+        assert!(json.is_json());
+        assert_eq!(json.mode(), OutputMode::Json);
+    }
+
+    #[test]
+    fn json_event_serialization() {
+        let event = JsonEvent::TransferStart {
+            transfer_id: "abc123".to_string(),
+            files: 5,
+            total_bytes: 1024,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"transfer_start\""));
+        assert!(json.contains("\"files\":5"));
+        assert!(json.contains("\"total_bytes\":1024"));
+    }
+
+    #[test]
+    fn json_event_progress_serialization() {
+        let event = JsonEvent::Progress {
+            transferred_bytes: 500,
+            total_bytes: 1000,
+            speed_mbps: 42.5,
+            elapsed_secs: 1.5,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"progress\""));
+        assert!(json.contains("\"speed_mbps\":42.5"));
+    }
+
+    #[test]
+    fn json_event_complete_serialization() {
+        let event = JsonEvent::TransferComplete {
+            elapsed_secs: 3.14,
+            total_bytes: 10485760,
+            speed_mbps: 100.0,
+            verified: true,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"transfer_complete\""));
+        assert!(json.contains("\"verified\":true"));
+    }
+
+    #[test]
+    fn json_event_dry_run_serialization() {
+        let event = JsonEvent::DryRun {
+            files: 10,
+            total_bytes: 5242880,
+            block_size: 4194304,
+            blocks: 2,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"dry_run\""));
+        assert!(json.contains("\"block_size\":4194304"));
+    }
+
+    #[test]
+    fn json_event_error_serialization() {
+        let event = JsonEvent::Error {
+            message: "something broke".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"error\""));
+        assert!(json.contains("\"something broke\""));
+    }
+
+    #[test]
+    fn human_reporter_progress_callback_is_none() {
+        let reporter = Reporter::from_flag(false);
+        assert!(reporter.progress_callback().is_none());
+    }
+
+    #[test]
+    fn json_reporter_progress_callback_is_some() {
+        let reporter = Reporter::from_flag(true);
+        assert!(reporter.progress_callback().is_some());
+    }
+}

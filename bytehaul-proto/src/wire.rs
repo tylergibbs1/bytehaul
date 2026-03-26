@@ -50,8 +50,11 @@ pub enum WireError {
     #[error("quinn read exact error: {0}")]
     ReadExactError(#[from] quinn::ReadExactError),
 
-    #[error("bincode error: {0}")]
-    Bincode(#[from] bincode::Error),
+    #[error("bincode encode error: {0}")]
+    BincodeEncode(#[from] bincode::error::EncodeError),
+
+    #[error("bincode decode error: {0}")]
+    BincodeDecode(#[from] bincode::error::DecodeError),
 
     #[error(
         "control message size {size} exceeds maximum allowed size {MAX_CONTROL_MESSAGE_SIZE}"
@@ -213,7 +216,7 @@ pub async fn write_control_message(
     stream: &mut quinn::SendStream,
     msg: &ControlMessage,
 ) -> Result<()> {
-    let payload = bincode::serialize(msg)?;
+    let payload = bincode::serde::encode_to_vec(msg, bincode::config::standard())?;
     let len = payload.len();
 
     if len > MAX_CONTROL_MESSAGE_SIZE {
@@ -249,7 +252,7 @@ pub async fn read_control_message(
     let mut payload = vec![0u8; len];
     stream.read_exact(&mut payload).await?;
 
-    let msg = bincode::deserialize(&payload)?;
+    let (msg, _len) = bincode::serde::decode_from_slice(&payload, bincode::config::standard())?;
     Ok(msg)
 }
 
@@ -390,8 +393,8 @@ mod tests {
         ];
 
         for msg in &messages {
-            let encoded = bincode::serialize(msg).unwrap();
-            let decoded: ControlMessage = bincode::deserialize(&encoded).unwrap();
+            let encoded = bincode::serde::encode_to_vec(msg, bincode::config::standard()).unwrap();
+            let (decoded, _): (ControlMessage, _) = bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
 
             // Verify structural equality via debug representation.
             assert_eq!(format!("{:?}", msg), format!("{:?}", decoded));

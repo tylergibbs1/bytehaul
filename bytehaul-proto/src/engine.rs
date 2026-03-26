@@ -54,9 +54,13 @@ pub enum EngineError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Bincode (de)serialization failed.
-    #[error("bincode error: {0}")]
-    Bincode(#[from] bincode::Error),
+    /// Bincode encode failed.
+    #[error("bincode encode error: {0}")]
+    BincodeEncode(#[from] bincode::error::EncodeError),
+
+    /// Bincode decode failed.
+    #[error("bincode decode error: {0}")]
+    BincodeDecode(#[from] bincode::error::DecodeError),
 
     /// A tokio semaphore was closed unexpectedly.
     #[error("semaphore acquire error: {0}")]
@@ -247,7 +251,7 @@ impl Sender {
         // 2. Open control stream and send manifest
         let (mut ctrl_send, mut ctrl_recv) = conn.open_control_stream().await?;
 
-        let manifest_bytes = bincode::serialize(&manifest)?;
+        let manifest_bytes = bincode::serde::encode_to_vec(&manifest, bincode::config::standard())?;
         wire::write_control_message(
             &mut ctrl_send,
             &ControlMessage::Manifest { manifest_bytes },
@@ -487,7 +491,7 @@ impl Sender {
 
         // 1. Open control stream and send manifest
         let (mut ctrl_send, mut ctrl_recv) = conn.open_control_stream().await?;
-        let manifest_bytes = bincode::serialize(manifest)?;
+        let manifest_bytes = bincode::serde::encode_to_vec(manifest, bincode::config::standard())?;
         wire::write_control_message(
             &mut ctrl_send,
             &ControlMessage::Manifest { manifest_bytes },
@@ -793,7 +797,7 @@ impl Sender {
         );
 
         // Send manifest over the already-accepted control stream.
-        let manifest_bytes = bincode::serialize(&manifest)?;
+        let manifest_bytes = bincode::serde::encode_to_vec(&manifest, bincode::config::standard())?;
         wire::write_control_message(
             ctrl_send,
             &ControlMessage::Manifest { manifest_bytes },
@@ -1064,7 +1068,7 @@ impl Receiver {
 
         let manifest_msg = wire::read_control_message(&mut ctrl_recv).await?;
         let manifest: TransferManifest = match manifest_msg {
-            ControlMessage::Manifest { manifest_bytes } => bincode::deserialize(&manifest_bytes)?,
+            ControlMessage::Manifest { manifest_bytes } => bincode::serde::decode_from_slice(&manifest_bytes, bincode::config::standard())?.0,
             _ => return Err(EngineError::Protocol("expected Manifest message".into())),
         };
 
@@ -1367,16 +1371,36 @@ impl Receiver {
         conn: &QuicConnection,
         dest_dir: &Path,
     ) -> Result<Vec<PathBuf>> {
-        let start = std::time::Instant::now();
-
-        // 1. Accept control stream and read manifest
-        let (mut ctrl_send, mut ctrl_recv) = conn.accept_control_stream().await?;
+        // Accept control stream and read manifest, then delegate.
+        let (ctrl_send, mut ctrl_recv) = conn.accept_control_stream().await?;
 
         let manifest_msg = wire::read_control_message(&mut ctrl_recv).await?;
-        let manifest: TransferManifest = match manifest_msg {
-            ControlMessage::Manifest { manifest_bytes } => bincode::deserialize(&manifest_bytes)?,
+        let manifest_bytes = match manifest_msg {
+            ControlMessage::Manifest { manifest_bytes } => manifest_bytes,
             _ => return Err(EngineError::Protocol("expected Manifest message".into())),
         };
+
+        self.receive_transfer_preread(conn, dest_dir, manifest_bytes, ctrl_send, ctrl_recv)
+            .await
+    }
+
+    /// Receive a multi-file transfer using a control stream and manifest
+    /// bytes that have already been read by the caller.
+    ///
+    /// This enables the server to peek at the first control message (to
+    /// distinguish send vs pull) and then hand off to this method for the
+    /// normal receive path.
+    pub async fn receive_transfer_preread(
+        &self,
+        conn: &QuicConnection,
+        dest_dir: &Path,
+        manifest_bytes: Vec<u8>,
+        mut ctrl_send: quinn::SendStream,
+        mut ctrl_recv: quinn::RecvStream,
+    ) -> Result<Vec<PathBuf>> {
+        let start = std::time::Instant::now();
+
+        let manifest: TransferManifest = bincode::serde::decode_from_slice(&manifest_bytes, bincode::config::standard())?.0;
 
         if manifest.files.is_empty() {
             return Err(EngineError::Protocol("empty manifest".into()));
@@ -1703,7 +1727,7 @@ impl Receiver {
         // 2. Read the manifest the remote built for us.
         let manifest_msg = wire::read_control_message(&mut ctrl_recv).await?;
         let manifest: TransferManifest = match manifest_msg {
-            ControlMessage::Manifest { manifest_bytes } => bincode::deserialize(&manifest_bytes)?,
+            ControlMessage::Manifest { manifest_bytes } => bincode::serde::decode_from_slice(&manifest_bytes, bincode::config::standard())?.0,
             ControlMessage::Error { code, message } => {
                 return Err(EngineError::RemoteError { code, message });
             }

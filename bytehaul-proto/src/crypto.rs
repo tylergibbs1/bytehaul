@@ -18,7 +18,7 @@ use std::path::Path;
 use chacha20poly1305::aead::generic_array::GenericArray;
 use chacha20poly1305::aead::{Aead, KeyInit, OsRng};
 use chacha20poly1305::XChaCha20Poly1305;
-use rand::RngCore;
+use rand::RngCore as _;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -88,7 +88,7 @@ impl StateEncryptor {
             Ok(Self { key })
         } else {
             let mut key = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut key);
+            rand::rng().fill_bytes(&mut key);
 
             // Write with restrictive permissions (owner read/write only).
             let mut file = fs::OpenOptions::new()
@@ -163,7 +163,7 @@ mod tests {
     /// Helper: create a `StateEncryptor` with a random in-memory key.
     fn random_encryptor() -> StateEncryptor {
         let mut key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut key);
         StateEncryptor { key }
     }
 

@@ -9,6 +9,7 @@ use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 
 use bytehaul_proto::engine::{EngineConfig, OverwriteMode, Receiver, Sender};
+use bytehaul_proto::filter::FileFilter;
 use bytehaul_proto::manifest::MIN_BLOCK_SIZE;
 use bytehaul_proto::transport::{QuicClient, QuicServer, TransportConfig};
 use bytehaul_proto::verify;
@@ -380,4 +381,334 @@ async fn test_large_block_transfer() {
         source_hash, received_hash,
         "BLAKE3 hash must match with MIN_BLOCK_SIZE chunking"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Directory transfer tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_directory_transfer() {
+    let src_dir = TempDir::new().unwrap();
+    let recv_dir = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+
+    // Create a directory tree with 3 files in subdirs.
+    let root = src_dir.path();
+    tokio::fs::create_dir_all(root.join("sub/deep")).await.unwrap();
+    create_test_file(root, "alpha.bin", 8192).await;
+    create_test_file(&root.join("sub"), "beta.bin", 16384).await;
+    create_test_file(&root.join("sub/deep"), "gamma.bin", 4096).await;
+
+    // Hash the source files for later verification.
+    let hash_alpha = verify::hash_file(&root.join("alpha.bin")).await.unwrap();
+    let hash_beta = verify::hash_file(&root.join("sub/beta.bin")).await.unwrap();
+    let hash_gamma = verify::hash_file(&root.join("sub/deep/gamma.bin")).await.unwrap();
+
+    let server = QuicServer::bind(localhost_transport_config()).expect("server should bind");
+    let server_addr = server.local_addr();
+
+    let recv_dir_path = recv_dir.path().to_path_buf();
+    let receiver_config = EngineConfig {
+        state_dir: Some(state_dir.path().to_path_buf()),
+        block_size: MIN_BLOCK_SIZE,
+        ..Default::default()
+    };
+
+    let recv_handle = tokio::spawn(async move {
+        let conn = server.accept().await.expect("accept should succeed");
+        let receiver = Receiver::new(receiver_config).expect("receiver creation should succeed");
+        let received_paths = receiver
+            .receive_transfer(&conn, &recv_dir_path)
+            .await
+            .expect("receive_transfer should succeed");
+        conn.close();
+        received_paths
+    });
+
+    let conn = QuicClient::connect(server_addr, "localhost")
+        .await
+        .expect("client connect should succeed");
+
+    let sender = Sender::new(EngineConfig {
+        state_dir: Some(state_dir.path().to_path_buf()),
+        block_size: MIN_BLOCK_SIZE,
+        ..Default::default()
+    });
+    sender
+        .send_directory(&conn, root, "transferred")
+        .await
+        .expect("send_directory should succeed");
+    conn.close();
+
+    let received_paths = recv_handle.await.expect("receiver task should not panic");
+
+    // Verify we got 3 files.
+    assert_eq!(received_paths.len(), 3, "should receive exactly 3 files");
+
+    // Verify each file arrived with correct content by checking hashes.
+    let dest_root = recv_dir.path().join("transferred");
+    let recv_hash_alpha = verify::hash_file(&dest_root.join("alpha.bin")).await.unwrap();
+    let recv_hash_beta = verify::hash_file(&dest_root.join("sub/beta.bin")).await.unwrap();
+    let recv_hash_gamma = verify::hash_file(&dest_root.join("sub/deep/gamma.bin")).await.unwrap();
+
+    assert_eq!(hash_alpha, recv_hash_alpha, "alpha.bin hash mismatch");
+    assert_eq!(hash_beta, recv_hash_beta, "beta.bin hash mismatch");
+    assert_eq!(hash_gamma, recv_hash_gamma, "gamma.bin hash mismatch");
+}
+
+#[tokio::test]
+async fn test_directory_transfer_with_filter() {
+    let src_dir = TempDir::new().unwrap();
+    let recv_dir = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+
+    // Create a directory with mixed file types.
+    let root = src_dir.path();
+    tokio::fs::create_dir_all(root.join("docs")).await.unwrap();
+    create_test_file(root, "readme.txt", 1024).await;
+    create_test_file(root, "image.bin", 2048).await;
+    create_test_file(&root.join("docs"), "notes.txt", 512).await;
+    create_test_file(&root.join("docs"), "data.bin", 4096).await;
+
+    // Hash the .txt files we expect to transfer.
+    let hash_readme = verify::hash_file(&root.join("readme.txt")).await.unwrap();
+    let hash_notes = verify::hash_file(&root.join("docs/notes.txt")).await.unwrap();
+
+    let server = QuicServer::bind(localhost_transport_config()).expect("server should bind");
+    let server_addr = server.local_addr();
+
+    let recv_dir_path = recv_dir.path().to_path_buf();
+    let receiver_config = EngineConfig {
+        state_dir: Some(state_dir.path().to_path_buf()),
+        block_size: MIN_BLOCK_SIZE,
+        ..Default::default()
+    };
+
+    let recv_handle = tokio::spawn(async move {
+        let conn = server.accept().await.expect("accept should succeed");
+        let receiver = Receiver::new(receiver_config).expect("receiver creation should succeed");
+        let received_paths = receiver
+            .receive_transfer(&conn, &recv_dir_path)
+            .await
+            .expect("receive_transfer should succeed");
+        conn.close();
+        received_paths
+    });
+
+    let conn = QuicClient::connect(server_addr, "localhost")
+        .await
+        .expect("client connect should succeed");
+
+    let filter = FileFilter::new(&["*.txt".to_string()], &[]).expect("filter should build");
+    let sender = Sender::new(EngineConfig {
+        state_dir: Some(state_dir.path().to_path_buf()),
+        block_size: MIN_BLOCK_SIZE,
+        ..Default::default()
+    });
+    sender
+        .send_directory_filtered(&conn, root, "filtered", &filter)
+        .await
+        .expect("send_directory_filtered should succeed");
+    conn.close();
+
+    let received_paths = recv_handle.await.expect("receiver task should not panic");
+
+    // Only .txt files should have been transferred.
+    assert_eq!(received_paths.len(), 2, "should receive exactly 2 .txt files");
+
+    let dest_root = recv_dir.path().join("filtered");
+    let recv_hash_readme = verify::hash_file(&dest_root.join("readme.txt")).await.unwrap();
+    let recv_hash_notes = verify::hash_file(&dest_root.join("docs/notes.txt")).await.unwrap();
+
+    assert_eq!(hash_readme, recv_hash_readme, "readme.txt hash mismatch");
+    assert_eq!(hash_notes, recv_hash_notes, "notes.txt hash mismatch");
+
+    // Verify .bin files were NOT transferred.
+    assert!(
+        !dest_root.join("image.bin").exists(),
+        "image.bin should not have been transferred"
+    );
+    assert!(
+        !dest_root.join("docs/data.bin").exists(),
+        "data.bin should not have been transferred"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Delta transfer tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_delta_transfer_unchanged() {
+    let src_dir = TempDir::new().unwrap();
+    let recv_dir = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+
+    let file_size = MIN_BLOCK_SIZE as usize * 2; // 2 blocks
+    let source_path = create_test_file(src_dir.path(), "stable.bin", file_size).await;
+    let source_hash = verify::hash_file(&source_path).await.expect("hash source");
+
+    // First transfer: send the file initially (no delta, just establish baseline).
+    let received_path = run_transfer(
+        &source_path,
+        "stable.bin",
+        recv_dir.path(),
+        engine_config(state_dir.path()),
+        engine_config(state_dir.path()),
+    )
+    .await;
+
+    let first_hash = verify::hash_file(&received_path).await.expect("hash first");
+    assert_eq!(source_hash, first_hash, "first transfer hash must match");
+
+    // Second transfer: send the same file again with delta enabled.
+    // The receiver already has the file, so delta should detect no changes.
+    let server = QuicServer::bind(localhost_transport_config()).expect("server should bind");
+    let server_addr = server.local_addr();
+
+    let recv_dir_path = recv_dir.path().to_path_buf();
+    let state_dir_path = state_dir.path().to_path_buf();
+    let recv_handle = tokio::spawn(async move {
+        let conn = server.accept().await.expect("accept");
+        let receiver = Receiver::new(EngineConfig {
+            state_dir: Some(state_dir_path.clone()),
+            delta_enabled: true,
+            overwrite_mode: OverwriteMode::Overwrite,
+            ..Default::default()
+        })
+        .expect("receiver");
+        let paths = receiver
+            .receive_transfer(&conn, &recv_dir_path)
+            .await
+            .expect("receive_transfer delta");
+        conn.close();
+        paths
+    });
+
+    let conn = QuicClient::connect(server_addr, "localhost")
+        .await
+        .expect("client connect");
+
+    let sender = Sender::new(EngineConfig {
+        state_dir: Some(state_dir.path().to_path_buf()),
+        delta_enabled: true,
+        overwrite_mode: OverwriteMode::Overwrite,
+        ..Default::default()
+    });
+    sender
+        .send_file(&conn, &source_path, "stable.bin")
+        .await
+        .expect("send_file delta");
+    conn.close();
+
+    let delta_paths = recv_handle.await.expect("receiver task");
+    assert!(!delta_paths.is_empty(), "should have received at least one file");
+
+    // Verify the received file still matches after the delta transfer.
+    let delta_hash = verify::hash_file(&delta_paths[0])
+        .await
+        .expect("hash delta");
+    assert_eq!(
+        source_hash, delta_hash,
+        "delta transfer of unchanged file must produce correct result"
+    );
+}
+
+#[tokio::test]
+async fn test_delta_transfer_partial_change() {
+    let src_dir = TempDir::new().unwrap();
+    let recv_dir = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+
+    let block_size = MIN_BLOCK_SIZE;
+    let file_size = block_size as usize * 4; // 4 blocks
+    let source_path = create_test_file(src_dir.path(), "mutable.bin", file_size).await;
+
+    // First transfer: send the original file.
+    let received_path = run_transfer(
+        &source_path,
+        "mutable.bin",
+        recv_dir.path(),
+        engine_config_with_block_size(state_dir.path(), block_size),
+        engine_config_with_block_size(state_dir.path(), block_size),
+    )
+    .await;
+
+    let first_hash = verify::hash_file(&received_path).await.expect("hash first");
+    let original_hash = verify::hash_file(&source_path).await.expect("hash original");
+    assert_eq!(original_hash, first_hash, "first transfer must match");
+
+    // Modify approximately 25% of the file (the first block).
+    {
+        let mut data = tokio::fs::read(&source_path).await.unwrap();
+        let modify_len = block_size as usize; // one full block = 25%
+        for byte in data[..modify_len].iter_mut() {
+            *byte = byte.wrapping_add(42);
+        }
+        tokio::fs::write(&source_path, &data).await.unwrap();
+    }
+
+    let modified_hash = verify::hash_file(&source_path).await.expect("hash modified");
+    assert_ne!(
+        original_hash, modified_hash,
+        "modified file should differ from original"
+    );
+
+    // Second transfer: send the modified file with delta enabled.
+    let server = QuicServer::bind(localhost_transport_config()).expect("server should bind");
+    let server_addr = server.local_addr();
+
+    let recv_dir_path = recv_dir.path().to_path_buf();
+    let state_dir_path = state_dir.path().to_path_buf();
+    let recv_handle = tokio::spawn(async move {
+        let conn = server.accept().await.expect("accept");
+        let receiver = Receiver::new(EngineConfig {
+            state_dir: Some(state_dir_path),
+            block_size,
+            delta_enabled: true,
+            overwrite_mode: OverwriteMode::Overwrite,
+            ..Default::default()
+        })
+        .expect("receiver");
+        let paths = receiver
+            .receive_transfer(&conn, &recv_dir_path)
+            .await
+            .expect("receive_transfer delta partial");
+        conn.close();
+        paths
+    });
+
+    let conn = QuicClient::connect(server_addr, "localhost")
+        .await
+        .expect("client connect");
+
+    let sender = Sender::new(EngineConfig {
+        state_dir: Some(state_dir.path().to_path_buf()),
+        block_size,
+        delta_enabled: true,
+        overwrite_mode: OverwriteMode::Overwrite,
+        ..Default::default()
+    });
+    sender
+        .send_file(&conn, &source_path, "mutable.bin")
+        .await
+        .expect("send_file delta partial");
+    conn.close();
+
+    let delta_paths = recv_handle.await.expect("receiver task");
+    assert!(!delta_paths.is_empty(), "should have received at least one file");
+
+    // Verify the received file matches the modified source.
+    let delta_hash = verify::hash_file(&delta_paths[0])
+        .await
+        .expect("hash delta partial");
+    assert_eq!(
+        modified_hash, delta_hash,
+        "delta transfer of partially changed file must produce correct result"
+    );
+
+    // Also verify the file size is unchanged.
+    let metadata = tokio::fs::metadata(&delta_paths[0]).await.unwrap();
+    assert_eq!(metadata.len(), file_size as u64, "file size must remain the same");
 }

@@ -175,7 +175,7 @@ pub fn generate_self_signed_cert(
 
     let cert_der = CertificateDer::from(certified_key.cert.der().to_vec());
     let key_der =
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified_key.key_pair.serialize_der()));
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified_key.signing_key.serialize_der()));
 
     Ok((vec![cert_der], key_der))
 }
