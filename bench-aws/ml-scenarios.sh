@@ -143,6 +143,13 @@ bh() {
     R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv; nohup bytehaul daemon --port $p --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul send --daemon '$IPB:$p' $x $f /b >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\""
 }
 
+# Like bh() but does NOT wipe /tmp/rv — used for delta tests that need
+# the previous transfer's data to still exist at the destination.
+bh_keep() {
+    local x="$1" f="$2" p="${3:-7700}"
+    R "K='$RK'; ssh \$K ec2-user@$IPB 'mkdir -p /tmp/rv; nohup bytehaul daemon --port $p --dest /tmp/rv --overwrite overwrite </dev/null >/dev/null 2>&1 &'; sleep 1; S=\$(python3 -c 'import time; print(time.time())'); RUST_LOG=error bytehaul send --daemon '$IPB:$p' $x $f /b >/dev/null 2>&1; E=\$(python3 -c 'import time; print(time.time())'); ssh \$K ec2-user@$IPB 'pkill -f \"bytehaul daemon\" 2>/dev/null || true'; python3 -c \"print(\$E-\$S)\""
+}
+
 sc() {
     local f="$1"
     R "K='$RK'; ssh \$K ec2-user@$IPB 'rm -rf /tmp/rv; mkdir -p /tmp/rv'; S=\$(python3 -c 'import time; print(time.time())'); scp -q \$K $f ec2-user@$IPB:/tmp/rv/b; E=\$(python3 -c 'import time; print(time.time())'); python3 -c \"print(\$E-\$S)\""
@@ -173,11 +180,12 @@ record $N "dataset-600files" "tar-ssh" "600x200KB" "$T" 117
 
 # ═══ 7-9: Checkpoint sync with delta ═══
 log "═══ 7-9: Delta sync (update 10% of checkpoint) ═══"
-# First: send baseline
+# First: send baseline (use bh which wipes dest, establishing clean state)
 bh "" "/tmp/checkpoint_step1000.pt" >/dev/null
 # Modify 10% (simulate next training step updating some weights)
 R 'dd if=/dev/urandom of=/tmp/checkpoint_step1000.pt bs=1M count=50 conv=notrunc 2>/dev/null'
-nx; T=$(bh "--delta" "/tmp/checkpoint_step1000.pt") || T=0; record $N "delta-sync-10pct" "bytehaul-delta" "500MB-10pct-changed" "$T" 500
+# Delta send: use bh_keep to preserve the baseline file at the destination
+nx; T=$(bh_keep "--delta" "/tmp/checkpoint_step1000.pt") || T=0; record $N "delta-sync-10pct" "bytehaul-delta" "500MB-10pct-changed" "$T" 500
 # Full re-send for comparison
 nx; T=$(bh "" "/tmp/checkpoint_step1000.pt") || T=0;          record $N "full-resend" "bytehaul" "500MB-full" "$T" 500
 nx; T=$(sc "/tmp/checkpoint_step1000.pt") || T=0;              record $N "full-resend" "scp" "500MB-full" "$T" 500
