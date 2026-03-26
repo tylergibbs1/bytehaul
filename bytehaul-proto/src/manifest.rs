@@ -121,6 +121,15 @@ pub struct TransferManifest {
 
     /// Timestamp of manifest creation.
     pub created_at: DateTime<Utc>,
+
+    /// Whether chunk payloads are zstd-compressed on the wire.
+    ///
+    /// When `true`, the sender compresses each chunk before transmission and
+    /// the receiver decompresses after receipt. BLAKE3 hashes in
+    /// [`ChunkHeader`](crate::wire::ChunkHeader) always refer to the
+    /// *uncompressed* data.
+    #[serde(default)]
+    pub compressed: bool,
 }
 
 impl TransferManifest {
@@ -144,6 +153,7 @@ impl TransferManifest {
             files,
             block_size,
             created_at: Utc::now(),
+            compressed: false,
         })
     }
 
@@ -155,6 +165,7 @@ impl TransferManifest {
             files: Vec::new(),
             block_size,
             created_at: Utc::now(),
+            compressed: false,
         }
     }
 

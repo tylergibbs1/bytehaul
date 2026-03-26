@@ -72,6 +72,8 @@ impl Server {
             overwrite_mode: self.config.overwrite_mode,
             delta_enabled: self.config.delta,
             encrypt_state: self.config.encrypt_state,
+            compress: self.config.compress,
+            compress_level: self.config.compress_level,
             ..Default::default()
         };
 

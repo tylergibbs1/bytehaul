@@ -4,6 +4,7 @@ members = [
     "bytehaul-cli",
     "bytehaul-lib",
     "bytehaul-bench",
+    "bytehaul-python",
 ]
 resolver = "2"
 
@@ -43,6 +44,23 @@ toml = "1"
 
 # Crypto
 chacha20poly1305 = "0.10"
+
+# Async
+async-trait = "0.1"
+
+# Compression
+zstd = "0.13"
+
+# File watching
+notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
+notify-debouncer-mini = "0.5"
+
+# Cloud storage (feature-gated)
+aws-config = { version = "1" }
+aws-sdk-s3 = { version = "1" }
+
+# Python bindings
+pyo3 = { version = "0.22", features = ["extension-module"] }
 
 # Util
 tempfile = "3"

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# bytehaul-slurm-stage: Slurm prolog/epilog script for staging data with ByteHaul
+#
+# Usage in Slurm:
+#   #SBATCH --prolog=/path/to/bytehaul-slurm-stage
+#   #SBATCH --epilog=/path/to/bytehaul-slurm-stage
+#
+# Environment variables:
+#   BYTEHAUL_STAGE_IN   Source for prolog (e.g., "s3://bucket/dataset/ /local/data/")
+#   BYTEHAUL_STAGE_OUT  Destination for epilog (e.g., "/local/results/ backup:/results/")
+#   BYTEHAUL_OPTS       Extra bytehaul flags (e.g., "--delta --compress")
+#
+# This script runs as a Slurm prolog (before the job starts) to stage data in,
+# and as an epilog (after the job ends) to stage results out.
+
+set -euo pipefail
+
+BYTEHAUL="${BYTEHAUL_BIN:-bytehaul}"
+OPTS="${BYTEHAUL_OPTS:-}"
+STAGE_IN="${BYTEHAUL_STAGE_IN:-}"
+STAGE_OUT="${BYTEHAUL_STAGE_OUT:-}"
+NODELIST="${SLURM_JOB_NODELIST:-}"
+
+log() { echo "[bytehaul-stage] $(date '+%H:%M:%S') $*"; }
+
+# Detect prolog vs epilog
+if [ "${SLURM_SCRIPT_CONTEXT:-prolog}" = "prolog" ] || [ -z "${SLURM_JOB_EXIT_CODE:-}" ]; then
+    MODE="prolog"
+else
+    MODE="epilog"
+fi
+
+if [ "$MODE" = "prolog" ] && [ -n "$STAGE_IN" ]; then
+    SRC=$(echo "$STAGE_IN" | awk '{print $1}')
+    DST=$(echo "$STAGE_IN" | awk '{print $2}')
+
+    log "Staging in: $SRC -> $DST"
+
+    if [ -n "$NODELIST" ]; then
+        # Fan-out to all nodes in the allocation
+        NODES=$(scontrol show hostnames "$NODELIST" | tr '\n' ' ')
+        DESTS=""
+        for node in $NODES; do
+            DESTS="$DESTS ${node}:${DST}"
+        done
+        log "Fan-out to nodes: $NODES"
+        $BYTEHAUL send -r $OPTS "$SRC" $DESTS
+    else
+        # Single node
+        $BYTEHAUL send -r $OPTS "$SRC" "$DST"
+    fi
+
+    log "Stage-in complete"
+
+elif [ "$MODE" = "epilog" ] && [ -n "$STAGE_OUT" ]; then
+    SRC=$(echo "$STAGE_OUT" | awk '{print $1}')
+    DST=$(echo "$STAGE_OUT" | awk '{print $2}')
+
+    log "Staging out: $SRC -> $DST"
+    $BYTEHAUL send -r --delta $OPTS "$SRC" "$DST"
+    log "Stage-out complete"
+fi

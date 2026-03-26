@@ -16,6 +16,8 @@ pub struct TransferConfig {
     pub overwrite_mode: OverwriteMode,
     pub delta: bool,
     pub encrypt_state: bool,
+    pub compress: bool,
+    pub compress_level: i32,
 }
 
 impl Default for TransferConfig {
@@ -30,6 +32,8 @@ impl Default for TransferConfig {
             overwrite_mode: OverwriteMode::default(),
             delta: false,
             encrypt_state: false,
+            compress: false,
+            compress_level: bytehaul_proto::compress::DEFAULT_COMPRESSION_LEVEL,
         }
     }
 }
@@ -94,6 +98,16 @@ impl TransferConfigBuilder {
 
     pub fn encrypt_state(mut self, enabled: bool) -> Self {
         self.config.encrypt_state = enabled;
+        self
+    }
+
+    pub fn compress(mut self, enabled: bool) -> Self {
+        self.config.compress = enabled;
+        self
+    }
+
+    pub fn compress_level(mut self, level: i32) -> Self {
+        self.config.compress_level = level;
         self
     }
 

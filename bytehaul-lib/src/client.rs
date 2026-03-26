@@ -97,6 +97,8 @@ impl Client {
             max_bandwidth_bps: self.config.max_bandwidth_mbps
                 .map(|mbps| mbps * 1_000_000 / 8)
                 .unwrap_or(0),
+            compress: self.config.compress,
+            compress_level: self.config.compress_level,
             ..Default::default()
         }
     }

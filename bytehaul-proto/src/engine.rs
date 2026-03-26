@@ -12,6 +12,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::chunking::{ChunkPlan, ChunkReader, ChunkScheduler, ChunkWriter};
+use crate::compress;
 use crate::congestion::BandwidthLimiter;
 use crate::manifest::{FileEntry, TransferManifest};
 use crate::resume::{StateManager, TransferState};
@@ -86,6 +87,10 @@ pub enum EngineError {
     /// File or chunk hash did not match after transfer.
     #[error("hash mismatch: {0}")]
     HashMismatch(String),
+
+    /// A compression or decompression error.
+    #[error("compression error: {0}")]
+    Compression(#[from] crate::compress::CompressionError),
 }
 
 /// Convenience type alias for engine operations.
@@ -168,6 +173,10 @@ pub struct EngineConfig {
     pub encrypt_state: bool,
     /// Maximum bandwidth in bytes per second (0 = unlimited).
     pub max_bandwidth_bps: u64,
+    /// Whether to compress chunk payloads with zstd before sending.
+    pub compress: bool,
+    /// Zstd compression level (1..=22).
+    pub compress_level: i32,
 }
 
 impl Default for EngineConfig {
@@ -182,6 +191,8 @@ impl Default for EngineConfig {
             delta_enabled: false,
             encrypt_state: false,
             max_bandwidth_bps: 0,
+            compress: false,
+            compress_level: crate::compress::DEFAULT_COMPRESSION_LEVEL,
         }
     }
 }
@@ -230,7 +241,7 @@ impl Sender {
 
         let file_size = tokio::fs::metadata(local_path).await?.len();
 
-        let manifest = TransferManifest::new(
+        let mut manifest = TransferManifest::new(
             vec![FileEntry {
                 source_path: local_path.to_path_buf(),
                 dest_path: PathBuf::from(remote_dest),
@@ -240,12 +251,14 @@ impl Sender {
             }],
             self.config.block_size,
         )?;
+        manifest.compressed = self.config.compress;
 
         info!(
-            "Transfer {}: {} bytes, {} blocks",
+            "Transfer {}: {} bytes, {} blocks{}",
             &manifest.transfer_id[..12],
             file_size,
-            manifest.total_blocks()
+            manifest.total_blocks(),
+            if manifest.compressed { " (compressed)" } else { "" },
         );
 
         // 2. Open control stream and send manifest
@@ -331,6 +344,8 @@ impl Sender {
                 let local_path = local_path.clone();
                 let conn_inner = conn.inner().clone();
                 let tid = transfer_id_bytes;
+                let do_compress = self.config.compress;
+                let compress_level = self.config.compress_level;
 
                 let handle = tokio::spawn(async move {
                     let _permit = permit;
@@ -348,8 +363,15 @@ impl Sender {
                     let data =
                         ChunkReader::read_chunk(&local_path, meta.offset, meta.size).await?;
 
-                    // Compute chunk hash
+                    // Compute chunk hash (always over uncompressed data)
                     let chunk_hash = verify::hash_bytes(&data);
+
+                    // Optionally compress the chunk payload
+                    let wire_data = if do_compress {
+                        compress::compress_chunk(&data, compress_level)?
+                    } else {
+                        data
+                    };
 
                     // Open a data stream and send
                     let (mut send, _recv) = conn_inner.open_bi().await.map_err(|e| {
@@ -359,17 +381,17 @@ impl Sender {
                     let header = ChunkHeader {
                         transfer_id: tid,
                         chunk_index: chunk_idx,
-                        chunk_size: meta.size,
+                        chunk_size: wire_data.len() as u32,
                         chunk_blake3: chunk_hash,
                     };
 
                     wire::write_chunk_header(&mut send, &header).await?;
-                    wire::write_chunk_data(&mut send, &data).await?;
+                    wire::write_chunk_data(&mut send, &wire_data).await?;
                     send.finish().map_err(|e| {
                         EngineError::Protocol(format!("failed to finish stream: {e}"))
                     })?;
 
-                    debug!("Sent chunk {} ({} bytes)", chunk_idx, meta.size);
+                    debug!("Sent chunk {} ({} bytes)", chunk_idx, wire_data.len());
                     Ok::<u64, EngineError>(chunk_idx)
                 });
 
@@ -481,17 +503,22 @@ impl Sender {
         let total_size = manifest.total_size();
         let total_chunks = manifest.total_blocks();
 
+        // Apply compression setting from engine config to the manifest.
+        let mut manifest = manifest.clone();
+        manifest.compressed = self.config.compress;
+
         info!(
-            "Transfer {}: {} files, {} bytes, {} blocks",
+            "Transfer {}: {} files, {} bytes, {} blocks{}",
             &manifest.transfer_id[..12],
             manifest.files.len(),
             total_size,
-            total_chunks
+            total_chunks,
+            if manifest.compressed { " (compressed)" } else { "" },
         );
 
         // 1. Open control stream and send manifest
         let (mut ctrl_send, mut ctrl_recv) = conn.open_control_stream().await?;
-        let manifest_bytes = bincode::serde::encode_to_vec(manifest, bincode::config::standard())?;
+        let manifest_bytes = bincode::serde::encode_to_vec(&manifest, bincode::config::standard())?;
         wire::write_control_message(
             &mut ctrl_send,
             &ControlMessage::Manifest { manifest_bytes },
@@ -625,12 +652,20 @@ impl Sender {
 
                 let conn_inner = conn.inner().clone();
                 let tid = transfer_id_bytes;
+                let do_compress = manifest.compressed;
+                let compress_level = self.config.compress_level;
 
                 let handle = tokio::spawn(async move {
                     let _permit = permit;
 
                     let data = ChunkReader::read_chunk(&source_path, local_offset, chunk_size).await?;
                     let chunk_hash = verify::hash_bytes(&data);
+
+                    let wire_data = if do_compress {
+                        compress::compress_chunk(&data, compress_level)?
+                    } else {
+                        data
+                    };
 
                     let (mut send, _recv) = conn_inner.open_bi().await.map_err(|e| {
                         EngineError::Protocol(format!("failed to open data stream: {e}"))
@@ -639,17 +674,17 @@ impl Sender {
                     let header = ChunkHeader {
                         transfer_id: tid,
                         chunk_index: chunk_idx,
-                        chunk_size,
+                        chunk_size: wire_data.len() as u32,
                         chunk_blake3: chunk_hash,
                     };
 
                     wire::write_chunk_header(&mut send, &header).await?;
-                    wire::write_chunk_data(&mut send, &data).await?;
+                    wire::write_chunk_data(&mut send, &wire_data).await?;
                     send.finish().map_err(|e| {
                         EngineError::Protocol(format!("failed to finish stream: {e}"))
                     })?;
 
-                    debug!("Sent chunk {} ({} bytes)", chunk_idx, chunk_size);
+                    debug!("Sent chunk {} ({} bytes)", chunk_idx, wire_data.len());
                     Ok::<u64, EngineError>(chunk_idx)
                 });
 
@@ -758,7 +793,7 @@ impl Sender {
         // Use a dummy dest_dir — the client will place files wherever it likes.
         let dummy_dest = Path::new("/pull");
 
-        let manifest = if remote_path.is_dir() {
+        let mut manifest = if remote_path.is_dir() {
             if !recursive {
                 return Err(EngineError::Protocol(
                     "remote path is a directory but recursive was not requested".into(),
@@ -790,15 +825,18 @@ impl Sender {
             )));
         };
 
+        manifest.compressed = self.config.compress;
+
         let total_size = manifest.total_size();
         let total_chunks = manifest.total_blocks();
 
         info!(
-            "Serving pull {}: {} files, {} bytes, {} blocks",
+            "Serving pull {}: {} files, {} bytes, {} blocks{}",
             &manifest.transfer_id[..12],
             manifest.files.len(),
             total_size,
-            total_chunks
+            total_chunks,
+            if manifest.compressed { " (compressed)" } else { "" },
         );
 
         // Send manifest over the already-accepted control stream.
@@ -882,12 +920,20 @@ impl Sender {
 
                 let conn_inner = conn.inner().clone();
                 let tid = transfer_id_bytes;
+                let do_compress = manifest.compressed;
+                let compress_level = self.config.compress_level;
 
                 let handle = tokio::spawn(async move {
                     let _permit = permit;
 
                     let data = ChunkReader::read_chunk(&source_path, local_offset, chunk_size).await?;
                     let chunk_hash = verify::hash_bytes(&data);
+
+                    let wire_data = if do_compress {
+                        compress::compress_chunk(&data, compress_level)?
+                    } else {
+                        data
+                    };
 
                     let (mut send, _recv) = conn_inner.open_bi().await.map_err(|e| {
                         EngineError::Protocol(format!("failed to open data stream: {e}"))
@@ -896,17 +942,17 @@ impl Sender {
                     let header = ChunkHeader {
                         transfer_id: tid,
                         chunk_index: chunk_idx,
-                        chunk_size,
+                        chunk_size: wire_data.len() as u32,
                         chunk_blake3: chunk_hash,
                     };
 
                     wire::write_chunk_header(&mut send, &header).await?;
-                    wire::write_chunk_data(&mut send, &data).await?;
+                    wire::write_chunk_data(&mut send, &wire_data).await?;
                     send.finish().map_err(|e| {
                         EngineError::Protocol(format!("failed to finish stream: {e}"))
                     })?;
 
-                    debug!("Sent chunk {} ({} bytes)", chunk_idx, chunk_size);
+                    debug!("Sent chunk {} ({} bytes)", chunk_idx, wire_data.len());
                     Ok::<u64, EngineError>(chunk_idx)
                 });
 
@@ -1183,10 +1229,18 @@ impl Receiver {
                         let (_send, mut recv) = result?;
                         let dp = dest_path.clone();
                         let cp = chunk_plan;
+                        let is_compressed = manifest.compressed;
+                        let max_decomp_size = block_size as usize;
 
                         set.spawn(async move {
                             let header = wire::read_chunk_header(&mut recv).await?;
-                            let data = wire::read_chunk_data(&mut recv, header.chunk_size).await?;
+                            let wire_data = wire::read_chunk_data(&mut recv, header.chunk_size).await?;
+
+                            let data = if is_compressed {
+                                compress::decompress_chunk(&wire_data, max_decomp_size)?
+                            } else {
+                                wire_data
+                            };
 
                             if !verify::verify_chunk(&data, &header.chunk_blake3) {
                                 return Ok((header.chunk_index, false));
@@ -1575,10 +1629,17 @@ impl Receiver {
                         let manifest_ref = manifest.clone();
                         let dest_paths_ref = dest_paths.clone();
                         let bs = block_size;
+                        let is_compressed = manifest.compressed;
 
                         set.spawn(async move {
                             let header = wire::read_chunk_header(&mut recv).await?;
-                            let data = wire::read_chunk_data(&mut recv, header.chunk_size).await?;
+                            let wire_data = wire::read_chunk_data(&mut recv, header.chunk_size).await?;
+
+                            let data = if is_compressed {
+                                compress::decompress_chunk(&wire_data, bs as usize)?
+                            } else {
+                                wire_data
+                            };
 
                             if !verify::verify_chunk(&data, &header.chunk_blake3) {
                                 return Ok((header.chunk_index, false));
@@ -1844,10 +1905,18 @@ impl Receiver {
                         let (_send, mut recv) = result?;
                         let manifest_ref = manifest.clone();
                         let dest_paths_ref = dest_paths.clone();
+                        let is_compressed = manifest.compressed;
+                        let max_decomp_size = block_size as usize;
 
                         set.spawn(async move {
                             let header = wire::read_chunk_header(&mut recv).await?;
-                            let data = wire::read_chunk_data(&mut recv, header.chunk_size).await?;
+                            let wire_data = wire::read_chunk_data(&mut recv, header.chunk_size).await?;
+
+                            let data = if is_compressed {
+                                compress::decompress_chunk(&wire_data, max_decomp_size)?
+                            } else {
+                                wire_data
+                            };
 
                             if !verify::verify_chunk(&data, &header.chunk_blake3) {
                                 return Ok((header.chunk_index, false));

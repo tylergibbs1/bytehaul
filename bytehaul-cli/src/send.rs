@@ -66,6 +66,14 @@ pub struct SendArgs {
     /// Exclude files matching these glob patterns (comma-separated)
     #[arg(long, value_delimiter = ',')]
     pub exclude: Vec<String>,
+
+    /// Compress chunks with zstd before sending
+    #[arg(long)]
+    pub compress: bool,
+
+    /// Zstd compression level (1-22, default 3)
+    #[arg(long, default_value = "3")]
+    pub compress_level: i32,
 }
 
 pub async fn run(args: SendArgs, json: bool) -> Result<()> {
@@ -154,6 +162,14 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
             "  Resume:      {}",
             if args.resume { "enabled" } else { "disabled" }
         );
+        eprintln!(
+            "  Compress:    {}",
+            if args.compress {
+                format!("enabled (level {})", args.compress_level)
+            } else {
+                "disabled".to_string()
+            }
+        );
         return Ok(());
     }
 
@@ -180,6 +196,8 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
                     CongestionMode::Fair
                 })
                 .delta(args.delta)
+                .compress(args.compress)
+                .compress_level(args.compress_level)
                 .build();
             let include = args.include.clone();
             let exclude = args.exclude.clone();
@@ -259,7 +277,11 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         config = config.max_bandwidth_mbps(mbps);
     }
 
-    let config = config.delta(args.delta).build();
+    let config = config
+        .delta(args.delta)
+        .compress(args.compress)
+        .compress_level(args.compress_level)
+        .build();
 
     // Connect
     let client = if let Some(ref daemon_addr) = args.daemon {

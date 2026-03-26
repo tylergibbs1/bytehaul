@@ -2,12 +2,14 @@ mod bench;
 mod clean;
 mod completions;
 mod daemon;
+mod gather;
 mod init;
 pub mod output;
 mod pull;
 mod send;
 mod status;
 mod sync_cmd;
+mod watch;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -72,6 +74,12 @@ enum Commands {
     /// Clean up stale transfer state files
     Clean(clean::CleanArgs),
 
+    /// Watch a directory and auto-send changed files
+    Watch(watch::WatchArgs),
+
+    /// Gather files from multiple remote hosts
+    Gather(gather::GatherArgs),
+
     /// Generate shell completions
     Completions(completions::CompletionsArgs),
 }
@@ -106,6 +114,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Init(args) => init::run(args).await,
         Commands::Status(args) => status::run(args).await,
         Commands::Clean(args) => clean::run(args).await,
+        Commands::Watch(args) => watch::run(args).await,
+        Commands::Gather(args) => gather::run(args).await,
         Commands::Completions(_) => unreachable!(),
     }
 }
