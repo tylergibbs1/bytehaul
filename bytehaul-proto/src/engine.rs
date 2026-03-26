@@ -629,36 +629,6 @@ impl Sender {
             return Ok(());
         }
 
-        // 4b. Adaptive optimization: profile the connection and adjust settings.
-        // Uses Quinn's connection stats to measure RTT and estimate conditions.
-        let fec_group_size = if self.config.adaptive {
-            let stats = conn.inner().stats();
-            let rtt = stats.path.rtt;
-            let profile = adaptive::NetworkProfile {
-                rtt,
-                loss_rate: 0.0, // Can't measure loss before sending; will be refined mid-transfer
-                bandwidth_bps: 0, // Unknown yet
-            };
-            let settings = adaptive::compute_adaptive_settings(&profile);
-            for line in &settings.rationale {
-                info!("Adaptive: {}", line);
-            }
-            settings.fec_group_size
-        } else {
-            self.config.fec_group_size
-        };
-
-        // FEC parity generation (if enabled, log the config; actual parity
-        // insertion into the data stream is a v0.4 feature that requires
-        // sequential chunk processing or a secondary parity stream).
-        if fec_group_size > 0 {
-            let overhead = 100.0 / (fec_group_size as f64 + 1.0);
-            info!(
-                "FEC enabled: group_size={} ({:.1}% overhead)",
-                fec_group_size, overhead
-            );
-        }
-
         // 5. Send chunks in parallel
         let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_streams));
         let mut sent_count = already_received;

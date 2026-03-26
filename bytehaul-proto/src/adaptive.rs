@@ -1,12 +1,23 @@
 //! Adaptive transfer optimization based on observed network conditions.
 //!
-//! Implements research-backed heuristics:
-//! - Auto-detect loss rate in first 2 seconds, switch BBR→Cubic if >0.1%
-//!   (arxiv:2510.22461, arxiv:2603.12660)
-//! - Recommend FEC group size based on measured loss
-//!   (arxiv:1904.11326 QUIC-FEC)
-//! - Enable GSO when available for reduced per-packet CPU overhead
-//!   (arxiv:2310.09423 "QUIC is not Quick Enough")
+//! This module computes **recommended** settings from a network profile.
+//! It is a decision engine, not a runtime controller — callers must apply
+//! the settings themselves.
+//!
+//! # Current integration status
+//!
+//! - **Implemented**: `compute_adaptive_settings()` returns optimal config
+//!   from observed RTT, loss rate, and bandwidth. Fully tested.
+//! - **Wired (read-only)**: The engine logs the initial RTT profile when
+//!   `adaptive: true` is set. Settings are not yet applied mid-transfer.
+//! - **Planned (v0.4)**: Mid-transfer re-profiling after first batch,
+//!   congestion controller switching, FEC activation, stream count tuning.
+//!
+//! # Research basis
+//!
+//! - BBR vs Cubic switching at >0.1% loss (arxiv:2510.22461, arxiv:2603.12660)
+//! - FEC group sizing from loss rate (arxiv:1904.11326 QUIC-FEC)
+//! - GSO for high-bandwidth links (arxiv:2310.09423)
 
 use std::time::{Duration, Instant};
 

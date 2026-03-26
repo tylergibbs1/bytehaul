@@ -85,6 +85,14 @@ impl Client {
         self
     }
 
+    /// Get the measured RTT from the QUIC connection handshake.
+    /// Returns None if no RTT estimate is available yet.
+    pub fn connection_rtt(&self) -> Option<std::time::Duration> {
+        let stats = self.conn.inner().stats();
+        let rtt = stats.path.rtt;
+        if rtt.as_nanos() > 0 { Some(rtt) } else { None }
+    }
+
     fn make_engine_config(&self) -> EngineConfig {
         EngineConfig {
             max_parallel_streams: self.config.max_parallel_streams,
