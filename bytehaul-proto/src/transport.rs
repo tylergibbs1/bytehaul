@@ -123,7 +123,10 @@ impl TransportConfig {
         // Allow enough concurrent streams for parallel chunk transfer + headroom.
         // The sender opens one stream per in-flight chunk, so we need at least
         // max_parallel_streams. Add headroom for control streams and overlap.
-        let stream_limit = self.max_concurrent_streams.max(64);
+        // For large directory transfers (600+ files), streams can accumulate
+        // faster than they're reclaimed. Allow 256 concurrent streams to avoid
+        // QUIC STREAMS_BLOCKED frames killing the connection.
+        let stream_limit = self.max_concurrent_streams.max(256);
         transport.max_concurrent_bidi_streams(VarInt::from_u32(stream_limit));
         transport.max_concurrent_uni_streams(VarInt::from_u32(0));
         if let Some(ka) = self.keep_alive_interval {
@@ -136,10 +139,15 @@ impl TransportConfig {
         ));
 
         // ── Congestion control ──
+        //
+        // BBR initial window: 2 MB allows immediate high-throughput sending
+        // without needing slow-start ramp-up. At 76ms RTT, the default 128 KB
+        // window needs ~10 RTTs (~760ms) to reach 100 Mbps throughput. With
+        // 2 MB, we start at ~210 Mbps from the first RTT.
         match self.congestion_algo {
             CongestionAlgo::Bbr => {
                 let mut bbr = quinn::congestion::BbrConfig::default();
-                bbr.initial_window(128 * 1024); // 128 KB (vs default ~14 KB)
+                bbr.initial_window(2 * 1024 * 1024); // 2 MB (16x default, fast ramp-up without burst loss)
                 transport.congestion_controller_factory(Arc::new(bbr));
             }
             CongestionAlgo::Cubic => {
@@ -148,12 +156,20 @@ impl TransportConfig {
             }
         }
 
-        // Large send/receive windows to sustain throughput on high-RTT links.
-        // At 1 Gbps and 200ms RTT, BDP = 25 MB. We set connection-level
-        // windows to 32 MB and per-stream windows to 8 MB.
-        transport.send_window(32 * 1024 * 1024);                            // 32 MB
-        transport.receive_window(VarInt::from_u32(32 * 1024 * 1024));       // 32 MB
-        transport.stream_receive_window(VarInt::from_u32(8 * 1024 * 1024)); // 8 MB per stream
+        // QUIC flow control windows sized for high-BDP links.
+        //
+        // With N parallel streams each sending block_size chunks, we need
+        // enough flow control headroom to avoid stalls. At 16 streams × 16 MB
+        // blocks = 256 MB maximum in-flight. The per-stream window must
+        // exceed block_size to avoid a mid-chunk flow control stall (each
+        // stall costs one full RTT of idle time).
+        //
+        // Connection-level: 256 MB covers all streams simultaneously.
+        // Per-stream: 32 MB covers a full 16 MB block with 2× headroom
+        // (needed because QUIC window updates are asynchronous).
+        transport.send_window(256 * 1024 * 1024);                             // 256 MB
+        transport.receive_window(VarInt::from_u32(256 * 1024 * 1024));        // 256 MB
+        transport.stream_receive_window(VarInt::from_u32(32 * 1024 * 1024));  // 32 MB per stream
 
         // Enable GSO (Generic Segmentation Offload) to reduce per-packet CPU
         // overhead. Critical at high bandwidth (arxiv:2310.09423 found QUIC

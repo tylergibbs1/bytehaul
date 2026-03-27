@@ -1,0 +1,5 @@
+experiment	name	description	throughput_500mb	throughput_100mb	throughput_dir	build_secs	kept	timestamp
+0	baseline	Initial baseline measurement	228.97	203.3	171.39	0	yes	2026-03-27T00:26:51Z
+1	sliding-window-pipeline	Replace batch-and-wait with JoinSet sliding window. Per-task overhead dominated.	209.4	135.74	168.29	0	no	2026-03-27T00:30:04Z
+2	remove-chunk-flush	Remove per-chunk flush() on receiver. Hypothesis: fsync overhead. Result: no measurable difference on macOS.	226.87	199.45	169.12	0	no	2026-03-27T00:32:25Z
+3	larger-quic-windows	Increase QUIC receive/send/stream windows (256MB/256MB/32MB). No impact on localhost (50us RTT makes window updates free).	227.12	201.2	169.34	0	no	2026-03-27T00:33:39Z

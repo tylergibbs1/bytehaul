@@ -1,0 +1,5 @@
+experiment	name	description	throughput_500mb	throughput_100mb	throughput_dir	rtt_ms	kept	timestamp
+0	baseline	Baseline on AWS (Ohio->Ireland, 75.973ms RTT)	35.92	35.6	24.97	75.973	yes	2026-03-27T00:38:07Z
+4	bbr-initial-window-quic-windows	BBR 2MB initial window + 256MB QUIC windows. +48% on 500MB AWS (76ms RTT).	53.2	36.82	0	76.155	yes	2026-03-27T00:46:16Z
+5	bbr-8mb-initial	BBR 8MB initial window (vs 2MB in exp 4). Further +10% on 500MB. Dir transfers failing.	58.63	37.68	0	76.165	yes	2026-03-27T00:50:05Z
+6	stabilized-2mb-256streams	BBR 2MB + 256 stream limit + 256MB windows. Stable config.	49.03	31.81	0	76.164	yes	2026-03-27T01:07:57Z
