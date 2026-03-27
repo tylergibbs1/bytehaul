@@ -6,6 +6,7 @@ use clap::Args;
 use console::style;
 
 use bytehaul_proto::resume::StateManager;
+use crate::output::Reporter;
 
 #[derive(Args)]
 pub struct CleanArgs {
@@ -22,33 +23,34 @@ pub struct CleanArgs {
     pub dry_run: bool,
 }
 
-pub async fn run(args: CleanArgs) -> Result<()> {
+pub async fn run(args: CleanArgs, reporter: &Reporter) -> Result<()> {
     let max_age = parse_duration(&args.max_age)?;
     let state_dir = args.state_dir.map(PathBuf::from);
 
     let mgr = StateManager::new(state_dir)?;
 
     if args.dry_run {
-        eprintln!(
-            "  Dry run: would delete state files older than {}",
-            style(&args.max_age).cyan()
-        );
-        // Load and check each file
-        let count = mgr.gc(max_age)?;
-        // gc actually deletes, so for a real dry-run we'd need a separate method
-        // For now, just report what gc found
-        eprintln!("  Would delete {} state file(s)", count);
+        let count = mgr.gc_preview(max_age)?;
+        if count == 0 {
+            reporter.info("  No stale state files found.");
+        } else {
+            reporter.info(&format!(
+                "  Dry run: would delete {} state file(s) older than {}",
+                count,
+                style(&args.max_age).cyan()
+            ));
+        }
     } else {
         let count = mgr.gc(max_age)?;
         if count == 0 {
-            eprintln!("  No stale state files found.");
+            reporter.info("  No stale state files found.");
         } else {
-            eprintln!(
+            reporter.info(&format!(
                 "  {} Removed {} state file(s) older than {}",
                 style("✓").green(),
                 count,
                 args.max_age
-            );
+            ));
         }
     }
 

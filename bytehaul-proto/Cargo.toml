@@ -27,6 +27,12 @@ walkdir = { workspace = true }
 globset = { workspace = true }
 anyhow = { workspace = true }
 zstd = { workspace = true }
+aws-config = { workspace = true, optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
+
+[features]
+default = []
+s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
 
 [lints]
 workspace = true

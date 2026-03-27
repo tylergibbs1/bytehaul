@@ -177,6 +177,13 @@ impl TransportConfig {
         // Quinn enables GSO by default on Linux; this ensures it's not disabled.
         // On non-Linux platforms, this is a no-op.
 
+        // Enable PMTUD: start at standard Ethernet MTU (1500 - 48 byte QUIC/UDP/IP
+        // overhead = 1452 payload). Quinn's PMTUD will probe higher if the path
+        // supports it. This avoids the default 1200-byte packets which waste 18%
+        // of each packet's capacity on typical links.
+        transport.initial_mtu(1452);
+        transport.min_mtu(1200);
+
         Ok(transport)
     }
 }

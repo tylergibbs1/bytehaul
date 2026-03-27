@@ -46,11 +46,20 @@ fn config_from_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<TransferCo
     if let Some(val) = kwargs.get_item("parallel")? {
         builder = builder.max_parallel_streams(val.extract::<usize>()?);
     }
-    // `compress` is accepted for forward-compatibility but is not yet wired
-    // to the engine (compression happens at the protocol layer in
-    // bytehaul-proto and is always enabled when zstd support is compiled in).
     if let Some(val) = kwargs.get_item("compress")? {
-        let _: bool = val.extract()?; // validate type, ignore value for now
+        builder = builder.compress(val.extract::<bool>()?);
+    }
+    if let Some(val) = kwargs.get_item("compress_level")? {
+        builder = builder.compress_level(val.extract::<i32>()?);
+    }
+    if let Some(val) = kwargs.get_item("encrypt_state")? {
+        builder = builder.encrypt_state(val.extract::<bool>()?);
+    }
+    if let Some(val) = kwargs.get_item("fec_group_size")? {
+        builder = builder.fec_group_size(val.extract::<usize>()?);
+    }
+    if let Some(val) = kwargs.get_item("adaptive")? {
+        builder = builder.adaptive(val.extract::<bool>()?);
     }
 
     Ok(builder.build())

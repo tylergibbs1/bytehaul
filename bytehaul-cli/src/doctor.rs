@@ -10,6 +10,7 @@ use console::style;
 use tokio::process::Command;
 
 use bytehaul_lib::client::Client;
+use crate::output::Reporter;
 
 #[derive(Args)]
 pub struct DoctorArgs {
@@ -98,7 +99,7 @@ impl Check {
     }
 }
 
-pub async fn run(args: DoctorArgs) -> Result<()> {
+pub async fn run(args: DoctorArgs, _reporter: &Reporter) -> Result<()> {
     let mut checks = run_local_checks().await;
 
     match args.command {

@@ -12,6 +12,8 @@ use bytehaul_proto::filter::FileFilter;
 use bytehaul_proto::manifest::TransferManifest;
 use bytehaul_proto::sync::{self, ConflictMode, SyncPlan};
 
+use crate::output::Reporter;
+
 #[derive(Args)]
 pub struct SyncArgs {
     /// Local directory to sync
@@ -55,6 +57,10 @@ pub struct SyncArgs {
     /// Exclude files matching these patterns
     #[arg(long, value_delimiter = ',')]
     pub exclude: Vec<String>,
+
+    /// FEC group size: generate 1 parity chunk per N data chunks (0 = disabled)
+    #[arg(long)]
+    pub fec_group_size: Option<usize>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -80,7 +86,7 @@ impl From<ConflictArg> for ConflictMode {
     }
 }
 
-pub async fn run(args: SyncArgs) -> Result<()> {
+pub async fn run(args: SyncArgs, reporter: &Reporter) -> Result<()> {
     let local_dir = PathBuf::from(&args.local_dir);
     if !local_dir.is_dir() {
         anyhow::bail!("Local path must be a directory: {}", local_dir.display());
@@ -95,10 +101,10 @@ pub async fn run(args: SyncArgs) -> Result<()> {
     let conflict_mode: ConflictMode = args.conflict.into();
 
     // 1. Build local manifest
-    eprintln!(
+    reporter.info(&format!(
         "  {} Scanning local directory...",
         style("↔").cyan().bold()
-    );
+    ));
 
     let filter = if !args.include.is_empty() || !args.exclude.is_empty() {
         FileFilter::new(&args.include, &args.exclude)
@@ -117,21 +123,21 @@ pub async fn run(args: SyncArgs) -> Result<()> {
     .await
     .unwrap_or_else(|_| {
         // Empty local dir — create a minimal manifest for comparison
-        eprintln!("  No local files found (empty directory)");
+        reporter.info("  No local files found (empty directory)");
         TransferManifest::empty(block_size)
     });
 
-    eprintln!(
+    reporter.info(&format!(
         "  Local: {} files, {}",
         local_manifest.files.len(),
         humansize::format_size(local_manifest.total_size(), humansize::BINARY)
-    );
+    ));
 
     // 2. Connect and get remote manifest
-    eprintln!(
+    reporter.info(&format!(
         "  {} Connecting to remote...",
         style("↔").cyan().bold()
-    );
+    ));
 
     let client = if let Some(ref daemon_addr) = args.daemon {
         let connect_config = TransferConfig::default();
@@ -154,10 +160,10 @@ pub async fn run(args: SyncArgs) -> Result<()> {
     // SyncRequest wire message which is planned but not yet implemented.
     // For v0.2, sync operates as "smart push with delta".
 
-    eprintln!(
+    reporter.info(&format!(
         "  {} Computing sync plan...",
         style("↔").cyan().bold()
-    );
+    ));
 
     // Simplified sync: push all local files that need updating.
     // This is equivalent to `send -r --delta` but with sync semantics.
@@ -167,19 +173,19 @@ pub async fn run(args: SyncArgs) -> Result<()> {
     );
 
     if args.dry_run {
-        eprintln!("  Dry run: {}", plan_summary);
+        reporter.info(&format!("  Dry run: {}", plan_summary));
         for entry in &local_manifest.files {
             let rel = entry.relative_path.as_deref()
                 .unwrap_or(entry.dest_path.as_path());
-            eprintln!("    push {}", rel.display());
+            reporter.info(&format!("    push {}", rel.display()));
         }
         return Ok(());
     }
 
-    eprintln!("  Plan: {}", plan_summary);
+    reporter.info(&format!("  Plan: {}", plan_summary));
 
     // 3. Execute push transfers
-    let config = TransferConfig::builder()
+    let mut config = TransferConfig::builder()
         .resume(true)
         .block_size_mb(args.block_size)
         .max_parallel_streams(args.parallel)
@@ -188,8 +194,11 @@ pub async fn run(args: SyncArgs) -> Result<()> {
             CongestionMode::Aggressive
         } else {
             CongestionMode::Fair
-        })
-        .build();
+        });
+    if let Some(fec) = args.fec_group_size {
+        config = config.fec_group_size(fec);
+    }
+    let config = config.build();
 
     let client = client.with_config(config);
     let start = Instant::now();
@@ -206,11 +215,18 @@ pub async fn run(args: SyncArgs) -> Result<()> {
     transfer.wait().await?;
 
     let elapsed = start.elapsed();
-    eprintln!(
+    reporter.info(&format!(
         "\n  {} Sync complete. {} in {:.1}s",
         style("✓").green().bold(),
         plan_summary,
         elapsed.as_secs_f64()
+    ));
+
+    reporter.transfer_summary(
+        local_manifest.files.len() as u64,
+        local_manifest.total_size(),
+        elapsed.as_secs_f64(),
+        false,
     );
 
     Ok(())

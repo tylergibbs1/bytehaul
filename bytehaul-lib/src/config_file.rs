@@ -50,6 +50,8 @@ pub struct TransferSection {
     pub delta: Option<bool>,
     /// Encrypt resume-state files at rest.
     pub encrypt_state: Option<bool>,
+    /// FEC group size (0 = disabled). Generates 1 parity chunk per N data chunks.
+    pub fec_group_size: Option<usize>,
     /// Overwrite behaviour: `"fail"`, `"rename"`, or `"overwrite"`.
     pub overwrite: Option<String>,
 }
@@ -173,6 +175,10 @@ impl ConfigFile {
     /// Whether resume-state encryption is enabled.
     pub fn transfer_encrypt_state(&self) -> Option<bool> {
         self.transfer.as_ref().and_then(|t| t.encrypt_state)
+    }
+
+    pub fn transfer_fec_group_size(&self) -> Option<usize> {
+        self.transfer.as_ref().and_then(|t| t.fec_group_size)
     }
 
     /// Overwrite mode parsed from the string value.

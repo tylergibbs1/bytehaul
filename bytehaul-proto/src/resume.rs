@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bitvec::prelude::*;
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -38,6 +40,10 @@ pub enum ResumeError {
     /// State directory is invalid or inaccessible.
     #[error("state directory error: {0}")]
     StateDir(String),
+
+    /// Encryption or decryption failed.
+    #[error("encryption error: {0}")]
+    Crypto(String),
 
     /// A block index was outside the valid range.
     #[error("block index {index} out of range (total_blocks={total_blocks})")]
@@ -172,8 +178,13 @@ impl TransferState {
 // ---------------------------------------------------------------------------
 
 /// Manages the on-disk lifecycle of [`TransferState`] files.
+///
+/// When `encrypt` is true, state files are encrypted with ChaCha20-Poly1305
+/// using a key derived from the transfer ID. Encrypted files use the `.enc`
+/// extension instead of `.json`.
 pub struct StateManager {
     state_dir: PathBuf,
+    encrypt: bool,
 }
 
 impl StateManager {
@@ -181,6 +192,11 @@ impl StateManager {
     ///
     /// If `state_dir` is `None`, defaults to `~/.bytehaul/state/`.
     pub fn new(state_dir: Option<PathBuf>) -> Result<Self> {
+        Self::with_encryption(state_dir, false)
+    }
+
+    /// Create a `StateManager` with optional encryption.
+    pub fn with_encryption(state_dir: Option<PathBuf>, encrypt: bool) -> Result<Self> {
         let state_dir = match state_dir {
             Some(d) => d,
             None => {
@@ -189,19 +205,29 @@ impl StateManager {
             }
         };
         fs::create_dir_all(&state_dir)?;
-        Ok(Self { state_dir })
+        Ok(Self { state_dir, encrypt })
     }
 
     /// Load state for `transfer_id` from disk. Returns `Ok(None)` when no
-    /// state file exists.
+    /// state file exists. Transparently decrypts if the encrypted file is
+    /// found.
     pub fn load(&self, transfer_id: &str) -> Result<Option<TransferState>> {
-        let path = self.state_path(transfer_id);
-        if !path.exists() {
-            return Ok(None);
+        // Try encrypted file first, then plaintext.
+        let enc_path = self.state_path_enc(transfer_id);
+        let json_path = self.state_path(transfer_id);
+
+        if enc_path.exists() {
+            let ciphertext = fs::read(&enc_path)?;
+            let json = Self::decrypt(transfer_id, &ciphertext)?;
+            let state: TransferState = serde_json::from_str(&json)?;
+            return Ok(Some(state));
         }
-        let data = fs::read_to_string(&path)?;
-        let state: TransferState = serde_json::from_str(&data)?;
-        Ok(Some(state))
+        if json_path.exists() {
+            let data = fs::read_to_string(&json_path)?;
+            let state: TransferState = serde_json::from_str(&data)?;
+            return Ok(Some(state));
+        }
+        Ok(None)
     }
 
     /// Atomically persist `state` to disk.
@@ -209,20 +235,32 @@ impl StateManager {
     /// Writes to a temporary file in the same directory, calls `fsync`, then
     /// renames over the target path. This guarantees that readers always see
     /// either the old or the new version -- never a partial write.
+    ///
+    /// When encryption is enabled, the JSON is encrypted with ChaCha20-Poly1305
+    /// and written with an `.enc` extension.
     pub fn save(&self, state: &TransferState) -> Result<()> {
-        let target = self.state_path(&state.transfer_id);
+        let target = if self.encrypt {
+            self.state_path_enc(&state.transfer_id)
+        } else {
+            self.state_path(&state.transfer_id)
+        };
         let dir = target
             .parent()
             .ok_or_else(|| ResumeError::StateDir("cannot determine parent dir".into()))?;
 
-        // Write to a named temp file in the same directory so rename is atomic.
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         let json = serde_json::to_string_pretty(state)?;
-        tmp.write_all(json.as_bytes())?;
-        tmp.as_file().sync_all()?; // fsync file data
+
+        if self.encrypt {
+            let ciphertext = Self::encrypt(&state.transfer_id, &json)?;
+            tmp.write_all(&ciphertext)?;
+        } else {
+            tmp.write_all(json.as_bytes())?;
+        }
+
+        tmp.as_file().sync_all()?;
         tmp.persist(&target).map_err(|e| e.error)?;
 
-        // fsync the directory to ensure the rename is durable on crash
         if let Ok(dir_file) = fs::File::open(dir) {
             let _ = dir_file.sync_all();
         }
@@ -231,50 +269,139 @@ impl StateManager {
     }
 
     /// Delete the state file for `transfer_id`. No error if it does not exist.
+    /// Removes both plaintext and encrypted variants.
     pub fn delete(&self, transfer_id: &str) -> Result<()> {
-        let path = self.state_path(transfer_id);
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
+        for path in [
+            self.state_path(transfer_id),
+            self.state_path_enc(transfer_id),
+        ] {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
         }
+        Ok(())
+    }
+
+    /// Count state files that would be garbage-collected (dry-run).
+    pub fn gc_preview(&self, max_age: Duration) -> Result<usize> {
+        self.gc_inner(max_age, false)
     }
 
     /// Garbage-collect state files whose `last_activity` is older than
     /// `max_age`. Returns the number of files deleted.
     pub fn gc(&self, max_age: Duration) -> Result<usize> {
+        self.gc_inner(max_age, true)
+    }
+
+    fn gc_inner(&self, max_age: Duration, delete: bool) -> Result<usize> {
         let cutoff = Utc::now()
             - chrono::Duration::from_std(max_age)
                 .unwrap_or_else(|_| chrono::Duration::seconds(0));
 
-        let mut deleted = 0usize;
+        let mut count = 0usize;
         for entry in fs::read_dir(&self.state_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            let ext = path.extension().and_then(|e| e.to_str());
+            if ext != Some("json") && ext != Some("enc") {
                 continue;
             }
-            // Attempt to read and parse; skip files that are not valid state.
-            let data = match fs::read_to_string(&path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            let state: TransferState = match serde_json::from_str(&data) {
-                Ok(s) => s,
-                Err(_) => continue,
+
+            let state: TransferState = if ext == Some("enc") {
+                let tid = match path.file_stem().and_then(|s| s.to_str()) {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                let data = match fs::read(&path) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let json = match Self::decrypt(&tid, &data) {
+                    Ok(j) => j,
+                    Err(_) => continue,
+                };
+                match serde_json::from_str(&json) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                }
+            } else {
+                let data = match fs::read_to_string(&path) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                match serde_json::from_str(&data) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                }
             };
             if state.last_activity < cutoff {
-                let _ = fs::remove_file(&path);
-                deleted += 1;
+                if delete {
+                    let _ = fs::remove_file(&path);
+                }
+                count += 1;
             }
         }
-        Ok(deleted)
+        Ok(count)
     }
 
     // -- private helpers ----------------------------------------------------
 
     fn state_path(&self, transfer_id: &str) -> PathBuf {
         self.state_dir.join(format!("{transfer_id}.json"))
+    }
+
+    fn state_path_enc(&self, transfer_id: &str) -> PathBuf {
+        self.state_dir.join(format!("{transfer_id}.enc"))
+    }
+
+    /// Derive a 256-bit encryption key from the transfer ID using BLAKE3.
+    /// The transfer ID is already a BLAKE3 hash, but we re-hash it with a
+    /// domain separator to produce a distinct key.
+    fn derive_key(transfer_id: &str) -> [u8; 32] {
+        blake3::derive_key("bytehaul-state-encryption-v1", transfer_id.as_bytes())
+    }
+
+    /// Encrypt JSON state with ChaCha20-Poly1305.
+    /// Output format: 12-byte nonce || ciphertext+tag.
+    fn encrypt(transfer_id: &str, plaintext: &str) -> Result<Vec<u8>> {
+        let key = Self::derive_key(transfer_id);
+        let cipher = ChaCha20Poly1305::new_from_slice(&key)
+            .map_err(|e| ResumeError::Crypto(format!("key init: {e}")))?;
+
+        // Use a random nonce for each save.
+        let mut nonce_bytes = [0u8; 12];
+        rand::Fill::fill(&mut nonce_bytes, &mut rand::rng());
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext.as_bytes())
+            .map_err(|e| ResumeError::Crypto(format!("encrypt: {e}")))?;
+
+        let mut out = Vec::with_capacity(12 + ciphertext.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    /// Decrypt state from nonce || ciphertext+tag.
+    fn decrypt(transfer_id: &str, data: &[u8]) -> Result<String> {
+        if data.len() < 12 {
+            return Err(ResumeError::Crypto("encrypted state too short".into()));
+        }
+
+        let key = Self::derive_key(transfer_id);
+        let cipher = ChaCha20Poly1305::new_from_slice(&key)
+            .map_err(|e| ResumeError::Crypto(format!("key init: {e}")))?;
+
+        let nonce = Nonce::from_slice(&data[..12]);
+        let plaintext = cipher
+            .decrypt(nonce, &data[12..])
+            .map_err(|e| ResumeError::Crypto(format!("decrypt: {e}")))?;
+
+        String::from_utf8(plaintext)
+            .map_err(|e| ResumeError::Crypto(format!("utf8: {e}")))
     }
 }
 
@@ -405,6 +532,45 @@ mod tests {
         // Old one should be gone, recent one should remain.
         assert!(mgr.load("old_transfer").unwrap().is_none());
         assert!(mgr.load("abc123").unwrap().is_some());
+    }
+
+    #[test]
+    fn encrypted_save_load_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = StateManager::with_encryption(Some(tmp.path().to_path_buf()), true).unwrap();
+
+        let mut state = sample_state();
+        state.mark_received(4);
+        state.mark_received(7);
+
+        mgr.save(&state).unwrap();
+
+        // Encrypted file should exist, not plaintext
+        assert!(!tmp.path().join("abc123.json").exists());
+        assert!(tmp.path().join("abc123.enc").exists());
+
+        let loaded = mgr.load("abc123").unwrap().expect("state should exist");
+        assert_eq!(loaded.transfer_id, "abc123");
+        assert_eq!(loaded.blocks_received, vec![4, 7]);
+
+        mgr.delete("abc123").unwrap();
+        assert!(!tmp.path().join("abc123.enc").exists());
+        assert!(mgr.load("abc123").unwrap().is_none());
+    }
+
+    #[test]
+    fn unencrypted_manager_reads_encrypted_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let enc_mgr = StateManager::with_encryption(Some(tmp.path().to_path_buf()), true).unwrap();
+
+        let mut state = sample_state();
+        state.mark_received(1);
+        enc_mgr.save(&state).unwrap();
+
+        // An unencrypted manager should still find and decrypt the .enc file
+        let plain_mgr = StateManager::new(Some(tmp.path().to_path_buf())).unwrap();
+        let loaded = plain_mgr.load("abc123").unwrap().expect("should find encrypted state");
+        assert_eq!(loaded.blocks_received, vec![1]);
     }
 
     #[test]

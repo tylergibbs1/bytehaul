@@ -8,13 +8,13 @@ pub const CLI_DEFAULT_PARALLEL_STREAMS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum TransferProfile {
-    /// Balanced defaults for everyday development and CI.
+    /// Balanced defaults for development and CI (8MB blocks, 8 streams, fair congestion)
     Dev,
-    /// High-throughput defaults for long-haul links.
+    /// Optimized for high-latency links like cross-region AWS (8MB blocks, 32 streams, aggressive)
     Wan,
-    /// Max-throughput defaults for large bulk transfers.
+    /// Maximum throughput for large bulk transfers (32MB blocks, 64 streams, aggressive)
     Bulk,
-    /// Conservative defaults for low-risk or constrained environments.
+    /// Conservative for low-risk or constrained environments (4MB blocks, 4 streams, fair)
     Safe,
 }
 

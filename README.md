@@ -7,12 +7,13 @@
 ## Quick Start
 
 ```bash
-# Common path
-bytehaul send ./checkpoint.pt gpu-node:/data/
-bytehaul send -r ./dataset/ gpu-node:/data/
+# Zero-config smart mode — just source and destination
+bytehaul ./checkpoint.pt gpu-node:/data/
+bytehaul ./dataset/ gpu-node:/data/
 
-# Profiles enable adaptive tuning by default
-bytehaul send --profile dev ./checkpoint.pt gpu-node:/data/
+# Or use explicit commands for more control
+bytehaul send --profile wan ./checkpoint.pt gpu-node:/data/
+bytehaul pull gpu-node:/results/ ./local/
 ```
 
 ## Performance (Real AWS, Ohio to Ireland, ~75ms RTT)
@@ -40,17 +41,18 @@ cargo build --release
 ## Commands
 
 ```bash
-# Zero-config smart mode (auto-detects everything)
+# Smart mode — auto-detects direction, profile, compression
 bytehaul ./data gpu-node:/path/
 
 # Send with advanced options
 bytehaul send -r --include "*.pt" --exclude "*.tmp" ./run/ gpu:/data/
 bytehaul send --compress --delta ./checkpoint.pt remote:/models/
-bytehaul send ./data host1:/path host2:/path host3:/path   # fan-out
+bytehaul send --fec-group-size 7 ./data.bin remote:/data/   # FEC for lossy links
+bytehaul send ./data host1:/p host2:/p host3:/p              # parallel fan-out
 
 # Pull from remote
 bytehaul pull gpu-node:/results/run_42/ ./local/
-bytehaul pull -r gpu-node:/checkpoints/ ./local/
+bytehaul pull -r --profile wan gpu-node:/checkpoints/ ./local/
 
 # Bidirectional sync
 bytehaul sync ./checkpoints/ gpu-node:/mnt/checkpoints/
@@ -72,6 +74,38 @@ bytehaul init          # Create config file
 bytehaul completions zsh  # Shell completions
 ```
 
+## CLI Features
+
+Every command supports `--help` with real-world examples.
+
+| Flag | Description |
+|---|---|
+| `--profile <dev\|wan\|bulk\|safe>` | Preset tuning (wan = 8MB blocks, 32 streams, aggressive) |
+| `--quiet / -q` | Suppress all non-error output (for scripts) |
+| `--json` | Machine-readable JSON events on stdout |
+| `--dry-run` | Preview what would be transferred |
+| `--resume` | Resume an interrupted transfer |
+| `--compress` | zstd compression for compressible data |
+| `--delta` | Only send changed blocks (rsync-style) |
+| `--fec-group-size N` | Forward error correction (7 = ~12.5% overhead) |
+
+Interrupted transfers print resume instructions:
+
+```
+  ! Transfer interrupted.
+  Resume with: bytehaul send --resume ./data user@host:/path
+```
+
+Transfer summaries show detailed stats:
+
+```
+  ✓ Transfer complete
+    Transferred: 42 files, 1.2 GiB
+    Speed:       120 MiB/s (1007 Mbps)
+    Elapsed:     10.2s
+    Verified:    BLAKE3 ✓
+```
+
 ## How It Works
 
 1. **QUIC transport** via Quinn -- parallel streams eliminate head-of-line blocking
@@ -81,9 +115,11 @@ bytehaul completions zsh  # Shell completions
 5. **BLAKE3 verification** -- per-chunk and whole-file integrity
 6. **Resumable** -- transfer state persisted atomically, crash-safe
 7. **Delta transfers** -- only send changed blocks
-8. **FEC parity** -- manifest-based transfers can send XOR repair parity over the control stream
-9. **zstd compression** -- optional per-chunk compression
-10. **SSH bootstrap** -- no daemon pre-install needed, auto-uploads binary
+8. **FEC parity** -- XOR-based forward erasure correction with `--fec-group-size N` (streaming recovery during transfer)
+9. **Encrypted resume state** -- `encrypt_state = true` in config encrypts state files at rest with ChaCha20-Poly1305
+10. **S3/GCS storage** -- `S3Storage` backend via `s3://` URLs (feature-gated behind `s3` cargo feature)
+11. **zstd compression** -- optional per-chunk compression
+12. **SSH bootstrap** -- no daemon pre-install needed, auto-uploads binary
 
 ## Library API (Rust)
 
@@ -119,7 +155,8 @@ pip install bytehaul
 from bytehaul import Client
 
 client = Client.connect_ssh("gpu-node")
-client.send("./checkpoint.pt", "/data/checkpoint.pt", delta=True, compress=True)
+client.send("./checkpoint.pt", "/data/checkpoint.pt", delta=True, compress=True,
+            fec_group_size=7, encrypt_state=True)
 ```
 
 ## Configuration
@@ -137,6 +174,8 @@ resume = true
 delta = false
 compress = false
 adaptive = true
+encrypt_state = false   # ChaCha20-Poly1305 encryption of resume state files
+fec_group_size = 0      # 0 = disabled, 7 = ~12.5% overhead, 15 = ~6%
 
 [daemon]
 port = 7700
@@ -195,8 +234,10 @@ AWS burstable networking introduces ~15% run-to-run variance. Optimizations are 
 
 - Profiles in the CLI enable adaptive transfer behavior by default.
 - Manifest-based transfers can emit `FecParity` control messages containing XOR parity for a small batch of chunk indices.
-- The receiver can use that parity to recover one missing chunk in the group before final file verification.
-- This is currently implemented on the manifest transfer path used by directories, pulls, and single-file sends when adaptive or FEC is active.
+- **Streaming FEC recovery**: the receiver attempts to recover missing chunks inline as parity groups arrive during transfer, not just after all data is received.
+- Use `--fec-group-size N` on the CLI (or `fec_group_size` in config) to enable. Recommended: 7 (~12.5% overhead) for lossy links, 15 (~6%) for mildly lossy.
+- S3/GCS storage backends are available behind the `s3` cargo feature: `cargo build --features s3`. Use `s3://bucket/key` URLs.
+- Resume state encryption uses ChaCha20-Poly1305 with a key derived from the transfer ID via BLAKE3 KDF. Enable with `encrypt_state = true`.
 
 ## License
 
@@ -205,6 +246,8 @@ Apache 2.0
 ## Contributing
 
 ```bash
-cargo test --workspace --exclude bytehaul-python  # 128 tests
+cargo test --workspace --exclude bytehaul-python
 RUST_LOG=debug bytehaul send ./test remote:/path   # Debug logging
+bytehaul send --dry-run ./data remote:/path         # Preview without transferring
+bytehaul -v send ./data remote:/path                # Verbose output
 ```

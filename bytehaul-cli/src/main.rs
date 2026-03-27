@@ -45,6 +45,10 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    /// Suppress all non-error output
+    #[arg(short, long, global = true)]
+    quiet: bool,
+
     /// Emit machine-readable JSON events to stdout
     #[arg(long, global = true)]
     json: bool,
@@ -52,16 +56,37 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Send with advanced options (flags, filters, fan-out)
+    /// Send files to a remote host
+    #[command(after_help = "\
+Examples:
+  bytehaul send ./model.pt gpu-node:/data/
+  bytehaul send -r ./dataset/ gpu-node:/data/           # directory
+  bytehaul send --profile wan ./data.bin remote:/path/   # high-latency link
+  bytehaul send ./data host1:/p host2:/p host3:/p        # fan-out
+  bytehaul send --compress --delta ./ckpt.pt remote:/m/  # compressed delta
+  bytehaul send --fec-group-size 7 ./data.bin r:/path/   # FEC for lossy links")]
     Send(send::SendArgs),
 
     /// Pull files from a remote host
+    #[command(after_help = "\
+Examples:
+  bytehaul pull gpu-node:/results/run_42/ ./local/
+  bytehaul pull -r gpu-node:/checkpoints/ ./local/
+  bytehaul pull --profile wan gpu-node:/data/model.pt ./")]
     Pull(pull::PullArgs),
 
-    /// Sync a directory with a remote host
+    /// Sync a local directory with a remote host
+    #[command(after_help = "\
+Examples:
+  bytehaul sync ./checkpoints/ gpu-node:/mnt/ckpts/
+  bytehaul sync --delta --conflict newer ./data/ remote:/data/")]
     Sync(sync_cmd::SyncArgs),
 
-    /// Start a receiver daemon
+    /// Start a receiver daemon (long-running server)
+    #[command(after_help = "\
+Examples:
+  bytehaul daemon --port 7700 --dest /data/incoming
+  bytehaul daemon --overwrite overwrite --bind 127.0.0.1")]
     Daemon(daemon::DaemonArgs),
 
     /// Run preflight checks for common workflows
@@ -70,7 +95,7 @@ enum Commands {
     /// Run transfer benchmarks
     Bench(bench::BenchArgs),
 
-    /// Initialize ByteHaul configuration
+    /// Initialize ByteHaul configuration (~/.bytehaul/config.toml)
     Init(init::InitArgs),
 
     /// Show active and recent transfers
@@ -80,9 +105,15 @@ enum Commands {
     Clean(clean::CleanArgs),
 
     /// Watch a directory and auto-send on changes
+    #[command(after_help = "\
+Examples:
+  bytehaul watch ./checkpoints/ --pattern 'step_*' backup:/ckpts/")]
     Watch(watch::WatchArgs),
 
-    /// Gather files from multiple remote hosts
+    /// Gather files from multiple remote hosts into one directory
+    #[command(after_help = "\
+Examples:
+  bytehaul gather node01:/ckpts/shard.pt node02:/ckpts/shard.pt -o ./merged/")]
     Gather(gather::GatherArgs),
 
     /// Generate shell completions
@@ -171,18 +202,20 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
+    let reporter = output::Reporter::from_flags(cli.json, cli.quiet);
+
     match cli.command {
-        Some(Commands::Send(args)) => send::run(args, cli.json).await,
-        Some(Commands::Pull(args)) => pull::run(args).await,
-        Some(Commands::Sync(args)) => sync_cmd::run(args).await,
+        Some(Commands::Send(args)) => send::run(args, &reporter).await,
+        Some(Commands::Pull(args)) => pull::run(args, &reporter).await,
+        Some(Commands::Sync(args)) => sync_cmd::run(args, &reporter).await,
         Some(Commands::Daemon(args)) => daemon::run(args).await,
-        Some(Commands::Doctor(args)) => doctor::run(args).await,
+        Some(Commands::Doctor(args)) => doctor::run(args, &reporter).await,
         Some(Commands::Bench(args)) => bench::run(args).await,
         Some(Commands::Init(args)) => init::run(args).await,
-        Some(Commands::Status(args)) => status::run(args).await,
-        Some(Commands::Clean(args)) => clean::run(args).await,
-        Some(Commands::Watch(args)) => watch::run(args).await,
-        Some(Commands::Gather(args)) => gather::run(args).await,
+        Some(Commands::Status(args)) => status::run(args, &reporter).await,
+        Some(Commands::Clean(args)) => clean::run(args, &reporter).await,
+        Some(Commands::Watch(args)) => watch::run(args, &reporter).await,
+        Some(Commands::Gather(args)) => gather::run(args, &reporter).await,
         Some(Commands::Completions(_)) => unreachable!(),
         None => {
             print_welcome();

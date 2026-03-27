@@ -105,6 +105,185 @@ impl Storage for LocalStorage {
     }
 }
 
+// ---------------------------------------------------------------------------
+// S3 storage backend (requires `s3` feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "s3")]
+pub mod s3 {
+    use super::*;
+    use aws_sdk_s3::Client as S3Client;
+    use aws_sdk_s3::primitives::ByteStream;
+
+    /// Amazon S3 storage backend.
+    ///
+    /// Paths are interpreted as `bucket/key`. For example, the URL
+    /// `s3://my-bucket/data/file.bin` maps to bucket=`my-bucket`,
+    /// key=`data/file.bin`.
+    pub struct S3Storage {
+        client: S3Client,
+    }
+
+    impl S3Storage {
+        /// Create a new S3Storage using default AWS credential chain.
+        pub async fn new() -> Self {
+            let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            Self {
+                client: S3Client::new(&config),
+            }
+        }
+
+        /// Create from an existing S3 client.
+        pub fn from_client(client: S3Client) -> Self {
+            Self { client }
+        }
+
+        /// Split a path into (bucket, key).
+        fn split_path(path: &Path) -> (&str, String) {
+            let s = path.to_str().unwrap_or("");
+            if let Some(pos) = s.find('/') {
+                (&s[..pos], s[pos + 1..].to_string())
+            } else {
+                (s, String::new())
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Storage for S3Storage {
+        async fn read_chunk(&self, path: &Path, offset: u64, len: u32) -> Result<Vec<u8>, std::io::Error> {
+            let (bucket, key) = Self::split_path(path);
+            let range = format!("bytes={}-{}", offset, offset + len as u64 - 1);
+
+            let resp = self.client
+                .get_object()
+                .bucket(bucket)
+                .key(&key)
+                .range(range)
+                .send()
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+            let bytes = resp.body
+                .collect()
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
+                .to_vec();
+
+            Ok(bytes)
+        }
+
+        async fn write_chunk(&self, path: &Path, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            // S3 doesn't support partial writes. For chunk-at-offset writes,
+            // we upload the data as a separate object with the offset encoded
+            // in a metadata tag. The caller is expected to assemble the final
+            // object separately, or use this for whole-object writes (offset=0).
+            if offset != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "S3 does not support partial writes; use offset=0 for full object upload",
+                ));
+            }
+
+            let (bucket, key) = Self::split_path(path);
+            self.client
+                .put_object()
+                .bucket(bucket)
+                .key(&key)
+                .body(ByteStream::from(data.to_vec()))
+                .send()
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+            Ok(())
+        }
+
+        async fn list_files(&self, prefix: &Path) -> Result<Vec<FileMeta>, std::io::Error> {
+            let (bucket, key_prefix) = Self::split_path(prefix);
+            let mut files = Vec::new();
+            let mut continuation_token = None;
+
+            loop {
+                let mut req = self.client
+                    .list_objects_v2()
+                    .bucket(bucket)
+                    .prefix(&key_prefix);
+
+                if let Some(token) = continuation_token.take() {
+                    req = req.continuation_token(token);
+                }
+
+                let resp = req
+                    .send()
+                    .await
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+                for obj in resp.contents() {
+                    if let Some(key) = obj.key() {
+                        files.push(FileMeta {
+                            path: PathBuf::from(format!("{bucket}/{key}")),
+                            size: obj.size.unwrap_or(0) as u64,
+                        });
+                    }
+                }
+
+                if resp.is_truncated() == Some(true) {
+                    continuation_token = resp.next_continuation_token().map(String::from);
+                } else {
+                    break;
+                }
+            }
+
+            Ok(files)
+        }
+
+        async fn metadata(&self, path: &Path) -> Result<FileMeta, std::io::Error> {
+            let (bucket, key) = Self::split_path(path);
+
+            let resp = self.client
+                .head_object()
+                .bucket(bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+            Ok(FileMeta {
+                path: path.to_path_buf(),
+                size: resp.content_length().unwrap_or(0) as u64,
+            })
+        }
+
+        async fn create_file(&self, path: &Path, _size: u64) -> Result<(), std::io::Error> {
+            // S3 doesn't need pre-allocation. Create an empty object as placeholder.
+            let (bucket, key) = Self::split_path(path);
+            self.client
+                .put_object()
+                .bucket(bucket)
+                .key(&key)
+                .body(ByteStream::from(Vec::new()))
+                .send()
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+            Ok(())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GCS storage backend (stub — uses S3-compatible API)
+// ---------------------------------------------------------------------------
+
+/// Google Cloud Storage backend.
+///
+/// GCS supports the S3-compatible XML API. This implementation delegates to
+/// S3Storage configured with the GCS endpoint. To use it, set the
+/// `AWS_ENDPOINT_URL=https://storage.googleapis.com` environment variable
+/// and provide GCS HMAC credentials via standard AWS env vars.
+#[cfg(feature = "s3")]
+pub use s3::S3Storage as GcsStorage;
+
 /// Parse a storage URL and return the appropriate backend + path.
 ///
 /// Supported URL schemes:

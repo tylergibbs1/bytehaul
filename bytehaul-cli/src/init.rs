@@ -22,7 +22,10 @@ const DEFAULT_CONFIG: &str = r#"# ByteHaul configuration
 # max_bandwidth_mbps = 0     # 0 = unlimited
 # resume = true              # Enable transfer resumption
 # delta = false              # Only send changed blocks
-# encrypt_state = false      # Encrypt resume state files
+# encrypt_state = false      # Encrypt resume state files (ChaCha20-Poly1305)
+# fec_group_size = 0         # FEC: 0 = disabled, 7 = ~12.5% overhead, 15 = ~6%
+# compress = false           # zstd compression for compressible data
+# adaptive = false           # Auto-tune based on network conditions
 # overwrite = "fail"         # "fail", "rename", or "overwrite"
 
 [daemon]

@@ -6,19 +6,16 @@ use clap::Args;
 use console::style;
 
 use bytehaul_proto::resume::StateManager;
+use crate::output::Reporter;
 
 #[derive(Args)]
 pub struct StatusArgs {
     /// State directory (default: ~/.bytehaul/state)
     #[arg(long)]
     pub state_dir: Option<String>,
-
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
-pub async fn run(args: StatusArgs) -> Result<()> {
+pub async fn run(args: StatusArgs, reporter: &Reporter) -> Result<()> {
     let state_dir = args.state_dir.map(PathBuf::from);
     let mgr = StateManager::new(state_dir.clone())?;
 
@@ -31,7 +28,7 @@ pub async fn run(args: StatusArgs) -> Result<()> {
     });
 
     if !dir.exists() {
-        eprintln!("  No state directory found. Run {} to initialize.", style("bytehaul init").cyan());
+        reporter.info(&format!("  No state directory found. Run {} to initialize.", style("bytehaul init").cyan()));
         return Ok(());
     }
 
@@ -50,22 +47,22 @@ pub async fn run(args: StatusArgs) -> Result<()> {
     }
 
     if entries.is_empty() {
-        eprintln!("  No active or recent transfers.");
+        reporter.info("  No active or recent transfers.");
         return Ok(());
     }
 
-    if args.json {
+    if reporter.is_json() {
         println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
     }
 
     entries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
 
-    eprintln!(
+    reporter.info(&format!(
         "  {:<14} {:<30} {:>10} {:>12} {:>10}  {}",
         "Transfer ID", "File", "Progress", "Size", "Age", "Status"
-    );
-    eprintln!("  {}", "─".repeat(90));
+    ));
+    reporter.info(&format!("  {}", "─".repeat(90)));
 
     let now = Utc::now();
     for state in &entries {
@@ -115,17 +112,17 @@ pub async fn run(args: StatusArgs) -> Result<()> {
             state.file_path.clone()
         };
 
-        eprintln!(
+        reporter.info(&format!(
             "  {:<14} {:<30} {:>10} {:>12} {:>10}  {}",
             id_short, file_display, format!("{:.0}%", pct), size, age_str, status
-        );
+        ));
     }
 
-    eprintln!(
+    reporter.info(&format!(
         "\n  {} transfer(s). Run {} to remove stale entries.",
         entries.len(),
         style("bytehaul clean").cyan()
-    );
+    ));
 
     Ok(())
 }

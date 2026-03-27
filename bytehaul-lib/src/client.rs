@@ -135,6 +135,7 @@ impl Client {
             compress: self.config.compress,
             compress_level: self.config.compress_level,
             adaptive: self.config.adaptive,
+            fec_group_size: self.config.fec_group_size.unwrap_or(0),
             ..Default::default()
         }
     }

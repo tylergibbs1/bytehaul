@@ -19,6 +19,7 @@ pub struct TransferConfig {
     pub compress: bool,
     pub compress_level: i32,
     pub adaptive: bool,
+    pub fec_group_size: Option<usize>,
 }
 
 impl Default for TransferConfig {
@@ -36,6 +37,7 @@ impl Default for TransferConfig {
             compress: false,
             compress_level: bytehaul_proto::compress::DEFAULT_COMPRESSION_LEVEL,
             adaptive: false,
+            fec_group_size: None,
         }
     }
 }
@@ -115,6 +117,11 @@ impl TransferConfigBuilder {
 
     pub fn adaptive(mut self, enabled: bool) -> Self {
         self.config.adaptive = enabled;
+        self
+    }
+
+    pub fn fec_group_size(mut self, size: usize) -> Self {
+        self.config.fec_group_size = Some(size);
         self
     }
 

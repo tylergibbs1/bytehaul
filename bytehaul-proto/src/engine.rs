@@ -1486,7 +1486,7 @@ pub struct Receiver {
 impl Receiver {
     /// Create a new receiver with the given configuration.
     pub fn new(config: EngineConfig) -> Result<Self> {
-        let state_manager = StateManager::new(config.state_dir.clone())?;
+        let state_manager = StateManager::with_encryption(config.state_dir.clone(), config.encrypt_state)?;
         Ok(Self {
             config,
             state_manager,
@@ -2020,10 +2020,71 @@ impl Receiver {
                                 sender_reported_complete = true;
                             }
                             ControlMessage::FecParity { chunk_indices, parity } => {
-                                parity_groups.push(PendingFecParity {
+                                // Streaming FEC: attempt immediate recovery
+                                // before stashing the group for later.
+                                let pending = PendingFecParity {
                                     chunk_indices,
                                     parity,
-                                });
+                                };
+                                let missing: Vec<u64> = pending
+                                    .chunk_indices
+                                    .iter()
+                                    .copied()
+                                    .filter(|idx| !state.is_received(*idx))
+                                    .collect();
+
+                                if missing.len() == 1 {
+                                    // Exactly one chunk missing — recover it now.
+                                    let mut decoder = FecDecoder::new(pending.chunk_indices.len());
+                                    let mut can_recover = true;
+                                    for (position, &chunk_idx) in pending.chunk_indices.iter().enumerate() {
+                                        if chunk_idx == missing[0] {
+                                            continue;
+                                        }
+                                        let recovery_result = (|| async {
+                                            let (file_idx, local_offset) = manifest_arc
+                                                .file_and_offset_for_block(chunk_idx)
+                                                .ok_or_else(|| {
+                                                    EngineError::Protocol(format!(
+                                                        "invalid chunk {chunk_idx} during streaming FEC"
+                                                    ))
+                                                })?;
+                                            let file_size = manifest_arc.files[file_idx].size;
+                                            let remaining = file_size.saturating_sub(local_offset);
+                                            let chunk_size = remaining.min(block_size as u64) as u32;
+                                            ChunkReader::read_chunk(
+                                                &dest_paths_arc[file_idx],
+                                                local_offset,
+                                                chunk_size,
+                                            ).await.map_err(EngineError::from)
+                                        })().await;
+                                        match recovery_result {
+                                            Ok(data) => decoder.receive_chunk(position, data),
+                                            Err(_) => { can_recover = false; break; }
+                                        }
+                                    }
+
+                                    if can_recover {
+                                        decoder.receive_parity(pending.parity.clone());
+                                        if let Some((pos, recovered_bytes)) = decoder.try_recover() {
+                                            let recovered_idx = pending.chunk_indices[pos];
+                                            if let Some((file_idx, local_offset)) =
+                                                manifest_arc.file_and_offset_for_block(recovered_idx)
+                                            {
+                                                let _ = ChunkWriter::write_chunk(
+                                                    &dest_paths_arc[file_idx],
+                                                    local_offset,
+                                                    &recovered_bytes,
+                                                ).await;
+                                                state.mark_received(recovered_idx);
+                                                ack_batch.push(recovered_idx);
+                                                info!(chunk_index = recovered_idx, "streaming FEC: recovered chunk");
+                                            }
+                                        }
+                                    }
+                                }
+
+                                parity_groups.push(pending);
                             }
                             ControlMessage::Error { code, message } => {
                                 return Err(EngineError::RemoteError { code, message });
@@ -2336,10 +2397,69 @@ impl Receiver {
                                 sender_reported_complete = true;
                             }
                             ControlMessage::FecParity { chunk_indices, parity } => {
-                                parity_groups.push(PendingFecParity {
+                                // Streaming FEC: attempt immediate recovery.
+                                let pending = PendingFecParity {
                                     chunk_indices,
                                     parity,
-                                });
+                                };
+                                let missing: Vec<u64> = pending
+                                    .chunk_indices
+                                    .iter()
+                                    .copied()
+                                    .filter(|idx| !state.is_received(*idx))
+                                    .collect();
+
+                                if missing.len() == 1 {
+                                    let mut decoder = FecDecoder::new(pending.chunk_indices.len());
+                                    let mut can_recover = true;
+                                    for (position, &chunk_idx) in pending.chunk_indices.iter().enumerate() {
+                                        if chunk_idx == missing[0] {
+                                            continue;
+                                        }
+                                        let recovery_result = (|| async {
+                                            let (file_idx, local_offset) = manifest
+                                                .file_and_offset_for_block(chunk_idx)
+                                                .ok_or_else(|| {
+                                                    EngineError::Protocol(format!(
+                                                        "invalid chunk {chunk_idx} during pull streaming FEC"
+                                                    ))
+                                                })?;
+                                            let file_size = manifest.files[file_idx].size;
+                                            let remaining = file_size.saturating_sub(local_offset);
+                                            let chunk_size = remaining.min(block_size as u64) as u32;
+                                            ChunkReader::read_chunk(
+                                                &dest_paths[file_idx],
+                                                local_offset,
+                                                chunk_size,
+                                            ).await.map_err(EngineError::from)
+                                        })().await;
+                                        match recovery_result {
+                                            Ok(data) => decoder.receive_chunk(position, data),
+                                            Err(_) => { can_recover = false; break; }
+                                        }
+                                    }
+
+                                    if can_recover {
+                                        decoder.receive_parity(pending.parity.clone());
+                                        if let Some((pos, recovered_bytes)) = decoder.try_recover() {
+                                            let recovered_idx = pending.chunk_indices[pos];
+                                            if let Some((file_idx, local_offset)) =
+                                                manifest.file_and_offset_for_block(recovered_idx)
+                                            {
+                                                let _ = ChunkWriter::write_chunk(
+                                                    &dest_paths[file_idx],
+                                                    local_offset,
+                                                    &recovered_bytes,
+                                                ).await;
+                                                state.mark_received(recovered_idx);
+                                                ack_batch.push(recovered_idx);
+                                                info!(chunk_index = recovered_idx, "pull streaming FEC: recovered chunk");
+                                            }
+                                        }
+                                    }
+                                }
+
+                                parity_groups.push(pending);
                             }
                             ControlMessage::Error { code, message } => {
                                 return Err(EngineError::RemoteError { code, message });

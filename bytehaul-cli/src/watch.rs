@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use bytehaul_lib::client::Client;
 use bytehaul_lib::config::TransferConfig;
 use bytehaul_proto::congestion::CongestionMode;
+use crate::output::Reporter;
 
 /// Parse a human-readable duration string like "500ms", "2s", "1m" into a `Duration`.
 fn parse_debounce(s: &str) -> Result<Duration, String> {
@@ -87,7 +88,7 @@ pub struct WatchArgs {
     pub delta: bool,
 }
 
-pub async fn run(args: WatchArgs) -> Result<()> {
+pub async fn run(args: WatchArgs, reporter: &Reporter) -> Result<()> {
     let source = PathBuf::from(&args.source);
     if !source.exists() {
         anyhow::bail!("Source directory not found: {}", source.display());
@@ -129,11 +130,11 @@ pub async fn run(args: WatchArgs) -> Result<()> {
         remote.clone()
     };
 
-    eprintln!(
+    reporter.info(&format!(
         "  {} Connecting to {}...",
         style("⟳").cyan(),
         style(&display_dest).bold()
-    );
+    ));
 
     let client = if let Some(ref daemon_addr) = args.daemon {
         Client::connect_daemon(daemon_addr, None).await?
@@ -155,7 +156,7 @@ pub async fn run(args: WatchArgs) -> Result<()> {
         None => None,
     };
 
-    eprintln!(
+    reporter.info(&format!(
         "  {} Watching {} for changes{}",
         style("✓").green().bold(),
         style(source.display()).bold(),
@@ -163,19 +164,19 @@ pub async fn run(args: WatchArgs) -> Result<()> {
             Some(p) => format!(" (pattern: {})", style(p).yellow()),
             None => String::new(),
         }
-    );
-    eprintln!(
+    ));
+    reporter.info(&format!(
         "  {} debounce={:?}, delta={}, parallel={}",
         style("⟶").dim(),
         args.debounce,
         args.delta,
         args.parallel,
-    );
-    eprintln!(
+    ));
+    reporter.info(&format!(
         "  {} Press {} to stop.\n",
         style("i").cyan(),
         style("Ctrl-C").bold()
-    );
+    ));
 
     // Set up an mpsc channel to bridge the synchronous notify callback into async.
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
@@ -221,7 +222,7 @@ pub async fn run(args: WatchArgs) -> Result<()> {
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                eprintln!("\n  {} Shutting down watcher.", style("i").cyan());
+                reporter.info(&format!("\n  {} Shutting down watcher.", style("i").cyan()));
                 break;
             }
         };
@@ -278,11 +279,11 @@ pub async fn run(args: WatchArgs) -> Result<()> {
             let local_str = match file_path.to_str() {
                 Some(s) => s,
                 None => {
-                    eprintln!(
+                    reporter.info(&format!(
                         "  {} Skipping file with non-UTF-8 path: {:?}",
                         style("!").yellow(),
                         file_path
-                    );
+                    ));
                     errors += 1;
                     continue;
                 }
@@ -291,22 +292,22 @@ pub async fn run(args: WatchArgs) -> Result<()> {
             match client.send_file(local_str, &dest_file).await {
                 Ok(mut transfer) => {
                     if let Err(e) = transfer.wait().await {
-                        eprintln!(
+                        reporter.info(&format!(
                             "  {} Failed to transfer {}: {}",
                             style("✗").red(),
                             rel.display(),
                             e
-                        );
+                        ));
                         errors += 1;
                     }
                 }
                 Err(e) => {
-                    eprintln!(
+                    reporter.info(&format!(
                         "  {} Failed to start transfer for {}: {}",
                         style("✗").red(),
                         rel.display(),
                         e
-                    );
+                    ));
                     errors += 1;
                 }
             }
@@ -318,7 +319,7 @@ pub async fn run(args: WatchArgs) -> Result<()> {
 
         let succeeded = file_count - errors;
         if errors == 0 {
-            eprintln!(
+            reporter.info(&format!(
                 "  [{}] {} Synced {} file{} ({}) to {}  ({:.1}s)",
                 timestamp,
                 style("✓").green().bold(),
@@ -327,9 +328,9 @@ pub async fn run(args: WatchArgs) -> Result<()> {
                 size_display,
                 style(&display_dest).bold(),
                 elapsed.as_secs_f64(),
-            );
+            ));
         } else {
-            eprintln!(
+            reporter.info(&format!(
                 "  [{}] {} Synced {} file{} ({}) to {}, {} failed  ({:.1}s)",
                 timestamp,
                 style("!").yellow().bold(),
@@ -339,7 +340,7 @@ pub async fn run(args: WatchArgs) -> Result<()> {
                 style(&display_dest).bold(),
                 errors,
                 elapsed.as_secs_f64(),
-            );
+            ));
         }
     }
 

@@ -74,6 +74,8 @@ impl Server {
             encrypt_state: self.config.encrypt_state,
             compress: self.config.compress,
             compress_level: self.config.compress_level,
+            fec_group_size: self.config.fec_group_size.unwrap_or(0),
+            adaptive: self.config.adaptive,
             ..Default::default()
         };
 

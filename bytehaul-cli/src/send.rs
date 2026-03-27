@@ -11,7 +11,7 @@ use bytehaul_lib::config::TransferConfig;
 use bytehaul_proto::congestion::CongestionMode;
 use bytehaul_proto::filter::FileFilter;
 
-use crate::output::{JsonEvent, Reporter};
+use crate::output::{JsonEvent, Reporter, PROGRESS_TEMPLATE, PROGRESS_CHARS, format_bytes};
 use crate::profiles::{apply_transfer_profile, TransferProfile};
 
 #[derive(Args)]
@@ -80,28 +80,32 @@ pub struct SendArgs {
     /// Delta transfer: only send changed blocks
     #[arg(long, help_heading = "Experimental")]
     pub delta: bool,
+
+    /// FEC group size: generate 1 parity chunk per N data chunks (0 = disabled).
+    /// Recommended: 7 for ~12.5% overhead, 15 for ~6% overhead.
+    #[arg(long, help_heading = "Advanced")]
+    pub fec_group_size: Option<usize>,
 }
 
-pub async fn run(args: SendArgs, json: bool) -> Result<()> {
-    let reporter = Reporter::from_flag(json);
-
+pub async fn run(args: SendArgs, reporter: &Reporter) -> Result<()> {
     let source = PathBuf::from(&args.source);
     if !source.exists() {
-        let msg = format!("Source file not found: {}", source.display());
-        reporter.emit(&JsonEvent::Error {
-            message: msg.clone(),
-        });
-        anyhow::bail!("{msg}");
+        reporter.error(&format!("Source not found: {}", source.display()));
+        anyhow::bail!(
+            "Source not found: {}\n\n  Check the path exists and you have read permissions.",
+            source.display()
+        );
     }
 
     let is_dir = source.is_dir();
     if is_dir && !args.recursive {
-        let msg =
-            "Source is a directory. Use -r/--recursive to send directories.".to_string();
-        reporter.emit(&JsonEvent::Error {
-            message: msg.clone(),
-        });
-        anyhow::bail!("{msg}");
+        reporter.error("Source is a directory");
+        anyhow::bail!(
+            "Source is a directory: {}\n\n  Use -r/--recursive to send directory contents:\n    bytehaul send -r {} {}",
+            source.display(),
+            source.display(),
+            args.destinations.first().map(|s| s.as_str()).unwrap_or("<dest>")
+        );
     }
 
     let (file_count, file_size) = if is_dir {
@@ -143,7 +147,7 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
             return Ok(());
         }
 
-        let file_size_display = humansize::format_size(file_size, humansize::BINARY);
+        let file_size_display = format_bytes(file_size);
         if is_dir {
             eprintln!(
                 "  {} Dry run: would send {} files ({})",
@@ -210,11 +214,14 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
                 args.parallel,
                 args.aggressive,
             );
-            let config = config
+            let mut config = config
                 .delta(args.delta)
                 .compress(args.compress)
-                .compress_level(args.compress_level)
-                .build();
+                .compress_level(args.compress_level);
+            if let Some(fec) = args.fec_group_size {
+                config = config.fec_group_size(fec);
+            }
+            let config = config.build();
             let include = args.include.clone();
             let exclude = args.exclude.clone();
 
@@ -291,11 +298,14 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         config = config.max_bandwidth_mbps(mbps);
     }
 
-    let config = config
+    let mut config = config
         .delta(args.delta)
         .compress(args.compress)
-        .compress_level(args.compress_level)
-        .build();
+        .compress_level(args.compress_level);
+    if let Some(fec) = args.fec_group_size {
+        config = config.fec_group_size(fec);
+    }
+    let config = config.build();
 
     // Connect
     let client = if let Some(ref daemon_addr) = args.daemon {
@@ -314,7 +324,7 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
 
     let client = client.with_config(config);
 
-    let file_size_display = humansize::format_size(file_size, humansize::BINARY);
+    let file_size_display = format_bytes(file_size);
     reporter.info(&tuning.summary_line());
     reporter.info(&format!(
         "  Sending: {} ({})",
@@ -372,12 +382,9 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         // Human mode: indicatif progress bar.
         let pb = ProgressBar::new(file_size);
         pb.set_style(
-            ProgressStyle::with_template(
-                "  {bar:40.cyan/blue} {bytes}/{total_bytes}\n  \
-                 Elapsed: {elapsed_precise} | {bytes_per_sec} | ETA: {eta}",
-            )
+            ProgressStyle::with_template(PROGRESS_TEMPLATE)
             .expect("hard-coded progress template is always valid")
-            .progress_chars("█▉▊▋▌▍▎▏ "),
+            .progress_chars(PROGRESS_CHARS),
         );
 
         let pb_clone = pb.clone();
@@ -385,36 +392,51 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
             pb_clone.set_position(p.transferred_bytes);
         });
 
-        transfer.wait().await?;
+        let result = tokio::select! {
+            r = transfer.wait() => r,
+            _ = tokio::signal::ctrl_c() => {
+                pb.finish_and_clear();
+                print_interrupt_hint(&args.source, &args.destinations[0]);
+                return Ok(());
+            }
+        };
         pb.finish_and_clear();
 
+        result?;
         let elapsed = wall_start.elapsed().as_secs_f64();
-        eprintln!(
-            "\n  {} Transfer complete. BLAKE3 verified. ({:.1}s)",
-            style("\u{2713}").green().bold(),
-            elapsed,
-        );
+        reporter.transfer_summary(file_count, file_size, elapsed, true);
         return Ok(());
     }
 
-    // JSON path: await transfer then emit completion event.
-    transfer.wait().await?;
-
-    let elapsed = wall_start.elapsed().as_secs_f64();
-    let speed_mbps = if elapsed > 0.0 {
-        (file_size as f64 * 8.0) / (elapsed * 1_000_000.0)
-    } else {
-        0.0
+    // JSON/quiet path: await transfer.
+    let result = tokio::select! {
+        r = transfer.wait() => r,
+        _ = tokio::signal::ctrl_c() => {
+            print_interrupt_hint(&args.source, &args.destinations[0]);
+            return Ok(());
+        }
     };
 
-    reporter.emit(&JsonEvent::TransferComplete {
-        elapsed_secs: elapsed,
-        total_bytes: file_size,
-        speed_mbps,
-        verified: true,
-    });
+    result?;
+    let elapsed = wall_start.elapsed().as_secs_f64();
+    reporter.transfer_summary(file_count, file_size, elapsed, true);
 
     Ok(())
+}
+
+fn print_interrupt_hint(source: &str, dest: &str) {
+    eprintln!();
+    eprintln!(
+        "  {} Transfer interrupted.",
+        console::style("!").yellow().bold()
+    );
+    eprintln!(
+        "  Resume with: {} send --resume {} {}",
+        console::style("bytehaul").cyan(),
+        source,
+        dest,
+    );
+    eprintln!();
 }
 
 /// Parse "user@host:/path" or "host:/path" into (remote, path).
@@ -424,32 +446,33 @@ fn parse_destination(dest: &str) -> Result<(String, String)> {
         let path = &dest[colon_pos + 1..];
         if remote.is_empty() || path.is_empty() {
             anyhow::bail!(
-                "Invalid destination format. Expected: user@host:/path or host:/path"
+                "Invalid destination: \"{dest}\"\n\n  Expected format: user@host:/path\n  Example: bytehaul send ./data.bin user@gpu-node:/data/"
             );
         }
         Ok((remote.to_string(), path.to_string()))
     } else {
         anyhow::bail!(
-            "Invalid destination format. Expected: user@host:/path or host:/path"
+            "Invalid destination: \"{dest}\"\n\n  Expected format: user@host:/path\n  Example: bytehaul send ./data.bin user@gpu-node:/data/"
         );
     }
 }
 
 /// Parse a rate string like "500mbps" or "1gbps" into megabits per second.
 fn parse_rate(rate: &str) -> Result<u64> {
-    let rate = rate.to_lowercase();
-    if let Some(n) = rate.strip_suffix("gbps") {
-        let n: u64 = n.parse().context("Invalid rate number")?;
+    let rate_lower = rate.to_lowercase();
+    if let Some(n) = rate_lower.strip_suffix("gbps") {
+        let n: u64 = n.parse().with_context(|| format!("Invalid rate: \"{rate}\". Expected a number before 'gbps'"))?;
         Ok(n * 1000)
-    } else if let Some(n) = rate.strip_suffix("mbps") {
-        let n: u64 = n.parse().context("Invalid rate number")?;
+    } else if let Some(n) = rate_lower.strip_suffix("mbps") {
+        let n: u64 = n.parse().with_context(|| format!("Invalid rate: \"{rate}\". Expected a number before 'mbps'"))?;
         Ok(n)
-    } else if let Some(n) = rate.strip_suffix("kbps") {
-        let n: u64 = n.parse().context("Invalid rate number")?;
+    } else if let Some(n) = rate_lower.strip_suffix("kbps") {
+        let n: u64 = n.parse().with_context(|| format!("Invalid rate: \"{rate}\". Expected a number before 'kbps'"))?;
         Ok(n / 1000)
     } else {
-        let n: u64 = rate.parse().context("Invalid rate. Use: 500mbps, 1gbps")?;
-        Ok(n)
+        anyhow::bail!(
+            "Invalid rate: \"{rate}\"\n\n  Expected format: <number><unit>\n  Examples: 500mbps, 1gbps, 100kbps"
+        );
     }
 }
 

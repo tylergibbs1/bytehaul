@@ -9,6 +9,8 @@ use bytehaul_lib::client::Client;
 use bytehaul_lib::config::TransferConfig;
 use bytehaul_proto::congestion::CongestionMode;
 
+use crate::output::Reporter;
+
 /// Gather files from multiple remote hosts to a local directory.
 ///
 /// Designed for collecting distributed checkpoint shards:
@@ -38,18 +40,39 @@ pub struct GatherArgs {
     /// Number of parallel streams per host
     #[arg(long, default_value = "16")]
     pub parallel: usize,
+
+    /// FEC group size: generate 1 parity chunk per N data chunks (0 = disabled)
+    #[arg(long)]
+    pub fec_group_size: Option<usize>,
+
+    /// Show what would be gathered without actually transferring
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
-pub async fn run(args: GatherArgs) -> Result<()> {
+pub async fn run(args: GatherArgs, reporter: &Reporter) -> Result<()> {
     let output_dir = PathBuf::from(&args.output);
+
+    if args.dry_run {
+        reporter.info(&format!(
+            "  Dry run: would gather from {} sources to {}",
+            args.sources.len(),
+            output_dir.display()
+        ));
+        for source in &args.sources {
+            reporter.info(&format!("    {}", source));
+        }
+        return Ok(());
+    }
+
     tokio::fs::create_dir_all(&output_dir).await?;
 
-    eprintln!(
+    reporter.info(&format!(
         "  {} Gathering from {} sources to {}",
         style("↓").cyan().bold(),
         args.sources.len(),
         output_dir.display()
-    );
+    ));
 
     let start = Instant::now();
     let mut handles = Vec::new();
@@ -61,19 +84,23 @@ pub async fn run(args: GatherArgs) -> Result<()> {
         let block_size = args.block_size;
         let parallel = args.parallel;
         let recursive = args.recursive;
+        let fec_group_size = args.fec_group_size;
 
         handles.push(tokio::spawn(async move {
             let (remote, remote_path) = parse_source(&source)?;
 
-            let config = TransferConfig::builder()
+            let mut config = TransferConfig::builder()
                 .block_size_mb(block_size)
                 .max_parallel_streams(parallel)
                 .congestion(if aggressive {
                     CongestionMode::Aggressive
                 } else {
                     CongestionMode::Fair
-                })
-                .build();
+                });
+            if let Some(fec) = fec_group_size {
+                config = config.fec_group_size(fec);
+            }
+            let config = config.build();
 
             let client = Client::connect_ssh(&remote).await?;
             let client = client.with_config(config);
@@ -98,22 +125,22 @@ pub async fn run(args: GatherArgs) -> Result<()> {
     for handle in handles {
         match handle.await {
             Ok(Ok((_, source))) => {
-                eprintln!("  {} {}", style("✓").green(), source);
+                reporter.info(&format!("  {} {}", style("✓").green(), source));
                 successes += 1;
             }
             Ok(Err(e)) => {
-                eprintln!("  {} {}", style("✗").red(), e);
+                reporter.info(&format!("  {} {}", style("✗").red(), e));
                 failures += 1;
             }
             Err(e) => {
-                eprintln!("  {} task panicked: {}", style("✗").red(), e);
+                reporter.info(&format!("  {} task panicked: {}", style("✗").red(), e));
                 failures += 1;
             }
         }
     }
 
     let elapsed = start.elapsed();
-    eprintln!(
+    reporter.info(&format!(
         "\n  {} Gather complete: {}/{} succeeded in {:.1}s",
         if failures == 0 {
             style("✓").green().bold()
@@ -123,6 +150,13 @@ pub async fn run(args: GatherArgs) -> Result<()> {
         successes,
         successes + failures,
         elapsed.as_secs_f64()
+    ));
+
+    reporter.transfer_summary(
+        successes as u64,
+        0,
+        elapsed.as_secs_f64(),
+        false,
     );
 
     if failures > 0 {
