@@ -6,9 +6,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
+use bytehaul_proto::congestion::CongestionMode;
 use bytehaul_proto::engine::{EngineConfig, Receiver, Sender, TransferProgress};
 use bytehaul_proto::filter::FileFilter;
-use bytehaul_proto::transport::{QuicClient, QuicConnection};
+use bytehaul_proto::transport::{CongestionAlgo, QuicClient, QuicConnection, TransportConfig};
 
 use crate::config::TransferConfig;
 
@@ -26,6 +27,32 @@ impl Client {
         Ok(Self {
             conn: Arc::new(conn),
             config: TransferConfig::default(),
+        })
+    }
+
+    /// Connect to a ByteHaul daemon with tuned transport settings.
+    ///
+    /// Unlike [`connect_daemon`], this applies the transfer configuration's
+    /// congestion algorithm to the QUIC transport layer at connection time,
+    /// ensuring the sender uses optimized BBR initial windows and flow
+    /// control settings from the start.
+    pub async fn connect_daemon_tuned(addr: &str, config: &TransferConfig) -> Result<Self> {
+        let socket_addr: SocketAddr = addr.parse().context("Invalid daemon address")?;
+        let congestion_algo = match config.congestion {
+            CongestionMode::Aggressive => CongestionAlgo::Bbr,
+            CongestionMode::Fair => CongestionAlgo::Bbr,
+        };
+        let transport_config = TransportConfig {
+            bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+            max_concurrent_streams: config.max_parallel_streams as u32,
+            keep_alive_interval: None,
+            idle_timeout: Duration::from_secs(30),
+            congestion_algo,
+        };
+        let conn = QuicClient::connect_with_config(socket_addr, "bytehaul", transport_config).await?;
+        Ok(Self {
+            conn: Arc::new(conn),
+            config: config.clone(),
         })
     }
 

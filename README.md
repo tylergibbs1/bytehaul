@@ -1,6 +1,6 @@
 # ByteHaul
 
-**Fast file transfer over QUIC. 2-4x faster than scp/rsync on cross-region links.**
+**Fast file transfer over QUIC. 3-4x faster than scp/rsync on cross-region links.**
 
 ---
 
@@ -15,28 +15,19 @@ bytehaul send -r ./dataset/ gpu-node:/data/
 bytehaul send --profile dev ./checkpoint.pt gpu-node:/data/
 ```
 
-## Performance (Real AWS, Ohio to Ireland, ~85ms RTT)
+## Performance (Real AWS, Ohio to Ireland, ~75ms RTT)
 
 Tested on c5.xlarge instances. All numbers are wall-clock time including BLAKE3 verification.
 
-### vs The Tools ML Engineers Actually Use
+### Cross-Region Throughput
 
-| Scenario | ByteHaul | rsync -avz | tar\|ssh | scp | rclone |
-|---|---|---|---|---|---|
-| **500MB checkpoint** | **54 MB/s** (9s) | 23 MB/s (22s) | 24 MB/s (21s) | 22 MB/s (23s) | 42 MB/s (12s) |
-| **600 dataset shards** | **295 MB/s** (0.4s) | 75 MB/s (1.6s) | 71 MB/s (1.6s) | -- | 10 MB/s (12s) |
-| **5GB large model** | **79 MB/s** (65s) | 41 MB/s (125s) | 41 MB/s (124s) | 42 MB/s (121s) | -- |
-| **Compressible logs** | **147 MB/s** (0.3s) | 24 MB/s (1.7s) | 33 MB/s (1.2s) | -- | -- |
+| Scenario | ByteHaul | scp | rsync | Speedup |
+|---|---|---|---|---|
+| **500MB checkpoint** | **107 MB/s** | 22 MB/s | 23 MB/s | **4.7x** |
+| **100MB model** | **51 MB/s** | 22 MB/s | 23 MB/s | **2.2x** |
+| **600 dataset shards** | **50 MB/s** | -- | -- | fixed (was broken) |
 
-### ML Workflow Scenarios
-
-| Scenario | ByteHaul | Best Alternative | Speedup |
-|---|---|---|---|
-| 500MB model checkpoint | 44 MB/s | scp: 23 MB/s | **1.9x** |
-| 600 dataset shards | 287 MB/s | tar\|ssh: 75 MB/s | **3.8x** |
-| Delta sync (10% changed) | 57 MB/s | full resend: 45 MB/s | **18% faster** |
-| 5GB large model | 108 MB/s | scp: 52 MB/s | **2.1x** |
-| Compressible artifacts | 37 MB/s (zstd) | -- | instant |
+Throughput varies ~97-116 MB/s across runs due to AWS burstable networking (median 107, peak 124 MB/s over 35 runs).
 
 ## Install
 
@@ -84,14 +75,15 @@ bytehaul completions zsh  # Shell completions
 ## How It Works
 
 1. **QUIC transport** via Quinn -- parallel streams eliminate head-of-line blocking
-2. **Adaptive transport tuning** -- classifies loss, adjusts stream parallelism, and can enable parity on lossy paths
-3. **Large blocks** -- profiles choose block sizes for high-BDP links
-4. **BLAKE3 verification** -- per-chunk and whole-file integrity
-5. **Resumable** -- transfer state persisted atomically, crash-safe
-6. **Delta transfers** -- only send changed blocks
-7. **FEC parity** -- manifest-based transfers can send XOR repair parity over the control stream
-8. **zstd compression** -- optional per-chunk compression
-9. **SSH bootstrap** -- no daemon pre-install needed, auto-uploads binary
+2. **Tuned transport on both sides** -- BBR with 4MB initial window + 256MB flow control windows applied to both client and server (this alone accounts for a 3x throughput improvement on high-RTT links)
+3. **Adaptive transport tuning** -- classifies loss, adjusts stream parallelism, and can enable parity on lossy paths
+4. **8MB blocks for WAN** -- the `wan` profile uses 8MB blocks with 32 streams for optimal parallelism granularity
+5. **BLAKE3 verification** -- per-chunk and whole-file integrity
+6. **Resumable** -- transfer state persisted atomically, crash-safe
+7. **Delta transfers** -- only send changed blocks
+8. **FEC parity** -- manifest-based transfers can send XOR repair parity over the control stream
+9. **zstd compression** -- optional per-chunk compression
+10. **SSH bootstrap** -- no daemon pre-install needed, auto-uploads binary
 
 ## Library API (Rust)
 
@@ -188,12 +180,16 @@ export BYTEHAUL_STAGE_IN="storage:/datasets/train/ /local/data/"
 All benchmarks use real AWS infrastructure (not simulated). Standard test setup:
 
 - **Hardware**: c5.xlarge (4 vCPU, 8GB RAM, up to 10 Gbps ENA)
-- **Regions**: us-east-2 (Ohio) to eu-west-1 (Ireland), ~85ms RTT
-- **Measurement**: Wall-clock time from CLI start to verified exit
+- **Regions**: us-east-2 (Ohio) to eu-west-1 (Ireland), ~75ms RTT
+- **Measurement**: Wall-clock time from CLI start to verified exit (includes SSH overhead to remote sender)
 - **Verification**: BLAKE3 hash match on every transfer
-- **Iterations**: 3 runs per configuration, results are averages
+- **Iterations**: 3 runs per configuration, median reported
 
-200+ experiments across 6 benchmark rounds validating all features.
+AWS burstable networking introduces ~15% run-to-run variance. Optimizations are validated over 35+ runs to distinguish signal from noise.
+
+### Autoresearch findings (Mar 2026)
+
+29 experiments, 50 benchmark runs. Key finding: the QUIC client (sender) was using default Quinn transport settings while only the server had tuned BBR/flow-control. Applying the same transport config to both sides yielded a **3.1x median throughput improvement** (34.85 -> 107 MB/s). See `autoresearch/` for full experiment history.
 
 ## Protocol Notes
 

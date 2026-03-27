@@ -134,7 +134,8 @@ pub async fn run(args: SyncArgs) -> Result<()> {
     );
 
     let client = if let Some(ref daemon_addr) = args.daemon {
-        Client::connect_daemon(daemon_addr, None).await?
+        let connect_config = TransferConfig::default();
+        Client::connect_daemon_tuned(daemon_addr, &connect_config).await?
     } else {
         Client::connect_ssh(&remote_host).await?
     };

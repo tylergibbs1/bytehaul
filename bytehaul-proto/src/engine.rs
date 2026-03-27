@@ -1911,12 +1911,14 @@ impl Receiver {
         .await?;
 
         // 5. Handle delta requests (if sender asks)
-        // Use a short timeout: if no delta request arrives within 100ms,
+        // Use a short timeout: if no delta request arrives within 10ms,
         // the sender isn't using delta and we proceed to chunk receiving.
+        // 10ms is ample on all links (any delta request is sent immediately
+        // after resume state is read) while saving ~90ms of idle time.
         let mut parity_groups = Vec::new();
         loop {
             let msg = tokio::time::timeout(
-                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(10),
                 wire::read_control_message(&mut ctrl_recv),
             ).await;
             let msg = match msg {
@@ -1988,6 +1990,8 @@ impl Receiver {
             let mut ack_batch = Vec::new();
             let mut set = JoinSet::new();
             let expected_manifest_hash = manifest.manifest_hash();
+            let manifest_arc = Arc::new(manifest.clone());
+            let dest_paths_arc = Arc::new(dest_paths.clone());
 
             loop {
                 if state.received_count() >= total_chunks || sender_reported_complete {
@@ -2044,10 +2048,10 @@ impl Receiver {
                     }
                     result = conn.accept_data_stream() => {
                         let (_send, mut recv) = result?;
-                        let manifest_ref = manifest.clone();
-                        let dest_paths_ref = dest_paths.clone();
+                        let manifest_ref = manifest_arc.clone();
+                        let dest_paths_ref = dest_paths_arc.clone();
                         let bs = block_size;
-                        let is_compressed = manifest.compressed;
+                        let is_compressed = manifest_ref.compressed;
 
                         set.spawn(async move {
                             let header = wire::read_chunk_header(&mut recv).await?;

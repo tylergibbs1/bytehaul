@@ -515,7 +515,7 @@ async fn hash_file(path: &Path) -> Result<(u64, [u8; 32])> {
     let size = metadata.len();
 
     let mut hasher = Hasher::new();
-    let mut buf = vec![0u8; 256 * 1024]; // 256 KiB read buffer
+    let mut buf = vec![0u8; 1024 * 1024]; // 1 MiB read buffer (match verify.rs)
     loop {
         let n = file.read(&mut buf).await?;
         if n == 0 {

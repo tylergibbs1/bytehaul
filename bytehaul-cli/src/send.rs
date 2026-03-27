@@ -303,7 +303,7 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
             "  Connecting to daemon at {}...",
             style(daemon_addr).cyan()
         ));
-        Client::connect_daemon(daemon_addr, None).await?
+        Client::connect_daemon_tuned(daemon_addr, &config).await?
     } else {
         reporter.info(&format!(
             "  {} receiver via SSH...",

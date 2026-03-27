@@ -198,7 +198,7 @@ impl ByteHaulCongestion {
     pub fn new(mode: CongestionMode) -> Self {
         let max_window = match mode {
             CongestionMode::Fair => 16 * 1024 * 1024,       // 16 MiB
-            CongestionMode::Aggressive => 128 * 1024 * 1024, // 128 MiB
+            CongestionMode::Aggressive => 256 * 1024 * 1024, // 256 MiB (match QUIC flow control)
         };
         Self {
             mode,
@@ -260,7 +260,7 @@ impl ByteHaulCongestion {
             // Adjust the ceiling when switching modes.
             self.max_window = match mode {
                 CongestionMode::Fair => 16 * 1024 * 1024,
-                CongestionMode::Aggressive => 128 * 1024 * 1024,
+                CongestionMode::Aggressive => 256 * 1024 * 1024,
             };
         }
     }

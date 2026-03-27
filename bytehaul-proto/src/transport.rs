@@ -147,7 +147,7 @@ impl TransportConfig {
         match self.congestion_algo {
             CongestionAlgo::Bbr => {
                 let mut bbr = quinn::congestion::BbrConfig::default();
-                bbr.initial_window(2 * 1024 * 1024); // 2 MB (16x default, fast ramp-up without burst loss)
+                bbr.initial_window(4 * 1024 * 1024); // 4 MB (32x default, fast ramp-up for high-BDP links)
                 transport.congestion_controller_factory(Arc::new(bbr));
             }
             CongestionAlgo::Cubic => {
@@ -331,12 +331,25 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 pub struct QuicClient;
 
 impl QuicClient {
-    /// Connect to a QUIC server at `addr`.
+    /// Connect to a QUIC server at `addr` using the given transport config.
     ///
     /// Certificate verification is **disabled** because the server uses an
     /// ephemeral self-signed certificate distributed over the SSH bootstrap
     /// channel. The `server_name` is used for the TLS SNI extension.
     pub async fn connect(addr: SocketAddr, server_name: &str) -> Result<QuicConnection> {
+        Self::connect_with_config(addr, server_name, TransportConfig::default()).await
+    }
+
+    /// Connect to a QUIC server using a custom [`TransportConfig`].
+    ///
+    /// This allows the client (sender) to use the same tuned transport
+    /// settings as the server — BBR initial window, QUIC flow control
+    /// windows, and congestion control algorithm.
+    pub async fn connect_with_config(
+        addr: SocketAddr,
+        server_name: &str,
+        config: TransportConfig,
+    ) -> Result<QuicConnection> {
         let mut rustls_config = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(SkipServerVerification::new())
@@ -348,7 +361,8 @@ impl QuicClient {
         let quic_client_config =
             quinn::crypto::rustls::QuicClientConfig::try_from(rustls_config)
                 .map_err(|e| TransportError::TlsConfig(rustls::Error::General(e.to_string())))?;
-        let client_config = ClientConfig::new(Arc::new(quic_client_config));
+        let mut client_config = ClientConfig::new(Arc::new(quic_client_config));
+        client_config.transport_config(Arc::new(config.to_quinn_transport()?));
 
         let bind_addr: SocketAddr = if addr.is_ipv6() {
             SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))

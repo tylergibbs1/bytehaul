@@ -44,7 +44,7 @@ impl TransferProfile {
             },
             Self::Wan => ProfileDefaults {
                 congestion: CongestionMode::Aggressive,
-                block_size_mb: 16,
+                block_size_mb: 8,
                 parallel_streams: 32,
             },
             Self::Bulk => ProfileDefaults {
