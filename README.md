@@ -4,7 +4,19 @@
 
 ---
 
-## Quick Start
+## Install
+
+Build from source with Rust (the `bytehaul` names on crates.io and PyPI belong to an unrelated project):
+
+```bash
+git clone https://github.com/tylergibbs1/bytehaul.git
+cd bytehaul
+cargo install --path bytehaul-cli   # installs the `bytehaul` binary
+```
+
+The remote side needs no pre-install: ByteHaul bootstraps over SSH and uploads its binary.
+
+## Quick start
 
 ```bash
 # Zero-config smart mode — just source and destination
@@ -30,15 +42,54 @@ Tested on c5.xlarge instances. All numbers are wall-clock time including BLAKE3 
 
 Throughput varies ~97-116 MB/s across runs due to AWS burstable networking (median 107, peak 124 MB/s over 35 runs).
 
-## Install
+## How it works
 
-```bash
-cargo install bytehaul
-# or build from source
-cargo build --release
+1. **QUIC transport** via Quinn -- parallel streams eliminate head-of-line blocking
+2. **Tuned transport on both sides** -- BBR with 4MB initial window + 256MB flow control windows applied to both client and server (this alone accounts for a 3x throughput improvement on high-RTT links)
+3. **Adaptive transport tuning** -- classifies loss, adjusts stream parallelism, and can enable parity on lossy paths
+4. **8MB blocks for WAN** -- the `wan` profile uses 8MB blocks with 32 streams for optimal parallelism granularity
+5. **BLAKE3 verification** -- per-chunk and whole-file integrity
+6. **Resumable** -- transfer state persisted atomically, crash-safe
+7. **Delta transfers** -- only send changed blocks
+8. **FEC parity** -- XOR-based forward erasure correction with `--fec-group-size N` (streaming recovery during transfer)
+9. **Encrypted resume state** -- `encrypt_state = true` in config encrypts state files at rest with ChaCha20-Poly1305
+10. **S3/GCS storage** -- `S3Storage` backend via `s3://` URLs (feature-gated behind `s3` cargo feature)
+11. **zstd compression** -- optional per-chunk compression
+12. **SSH bootstrap** -- no daemon pre-install needed, auto-uploads binary
+
+## CLI features
+
+Every command supports `--help` with real-world examples.
+
+| Flag | Description |
+|---|---|
+| `--profile <dev\|wan\|bulk\|safe>` | Preset tuning (wan = 8MB blocks, 32 streams, aggressive) |
+| `--quiet / -q` | Suppress all non-error output (for scripts) |
+| `--json` | Machine-readable JSON events on stdout |
+| `--dry-run` | Preview what would be transferred |
+| `--resume` | Resume an interrupted transfer |
+| `--compress` | zstd compression for compressible data |
+| `--delta` | Only send changed blocks (rsync-style) |
+| `--fec-group-size N` | Forward error correction (7 = ~12.5% overhead) |
+
+Interrupted transfers print resume instructions:
+
+```
+  ! Transfer interrupted.
+  Resume with: bytehaul send --resume ./data user@host:/path
 ```
 
-## Commands
+Transfer summaries show detailed stats:
+
+```
+  ✓ Transfer complete
+    Transferred: 42 files, 1.2 GiB
+    Speed:       120 MiB/s (1007 Mbps)
+    Elapsed:     10.2s
+    Verified:    BLAKE3 ✓
+```
+
+## Usage
 
 ```bash
 # Smart mode — auto-detects direction, profile, compression
@@ -74,53 +125,6 @@ bytehaul init          # Create config file
 bytehaul completions zsh  # Shell completions
 ```
 
-## CLI Features
-
-Every command supports `--help` with real-world examples.
-
-| Flag | Description |
-|---|---|
-| `--profile <dev\|wan\|bulk\|safe>` | Preset tuning (wan = 8MB blocks, 32 streams, aggressive) |
-| `--quiet / -q` | Suppress all non-error output (for scripts) |
-| `--json` | Machine-readable JSON events on stdout |
-| `--dry-run` | Preview what would be transferred |
-| `--resume` | Resume an interrupted transfer |
-| `--compress` | zstd compression for compressible data |
-| `--delta` | Only send changed blocks (rsync-style) |
-| `--fec-group-size N` | Forward error correction (7 = ~12.5% overhead) |
-
-Interrupted transfers print resume instructions:
-
-```
-  ! Transfer interrupted.
-  Resume with: bytehaul send --resume ./data user@host:/path
-```
-
-Transfer summaries show detailed stats:
-
-```
-  ✓ Transfer complete
-    Transferred: 42 files, 1.2 GiB
-    Speed:       120 MiB/s (1007 Mbps)
-    Elapsed:     10.2s
-    Verified:    BLAKE3 ✓
-```
-
-## How It Works
-
-1. **QUIC transport** via Quinn -- parallel streams eliminate head-of-line blocking
-2. **Tuned transport on both sides** -- BBR with 4MB initial window + 256MB flow control windows applied to both client and server (this alone accounts for a 3x throughput improvement on high-RTT links)
-3. **Adaptive transport tuning** -- classifies loss, adjusts stream parallelism, and can enable parity on lossy paths
-4. **8MB blocks for WAN** -- the `wan` profile uses 8MB blocks with 32 streams for optimal parallelism granularity
-5. **BLAKE3 verification** -- per-chunk and whole-file integrity
-6. **Resumable** -- transfer state persisted atomically, crash-safe
-7. **Delta transfers** -- only send changed blocks
-8. **FEC parity** -- XOR-based forward erasure correction with `--fec-group-size N` (streaming recovery during transfer)
-9. **Encrypted resume state** -- `encrypt_state = true` in config encrypts state files at rest with ChaCha20-Poly1305
-10. **S3/GCS storage** -- `S3Storage` backend via `s3://` URLs (feature-gated behind `s3` cargo feature)
-11. **zstd compression** -- optional per-chunk compression
-12. **SSH bootstrap** -- no daemon pre-install needed, auto-uploads binary
-
 ## Library API (Rust)
 
 ```rust
@@ -147,8 +151,11 @@ transfer.wait().await?;
 
 ## Python SDK
 
+Build the PyO3 bindings from source with [maturin](https://www.maturin.rs):
+
 ```bash
-pip install bytehaul
+cd bytehaul-python
+maturin develop --release
 ```
 
 ```python
@@ -199,7 +206,7 @@ bind = "0.0.0.0"
 ```yaml
 initContainers:
 - name: stage-data
-  image: bytehaul/bytehaul:latest
+  image: bytehaul/bytehaul:latest   # built from deploy/k8s/Dockerfile
   env:
   - name: BYTEHAUL_SOURCE
     value: "data-node:/datasets/imagenet/"
@@ -210,7 +217,7 @@ initContainers:
 ### Slurm
 
 ```bash
-#SBATCH --prolog=/path/to/bytehaul-slurm-stage
+#SBATCH --prolog=/path/to/bytehaul-slurm-stage   # bytehaul-cli/scripts/bytehaul-slurm-stage
 export BYTEHAUL_STAGE_IN="storage:/datasets/train/ /local/data/"
 ```
 
@@ -236,12 +243,8 @@ AWS burstable networking introduces ~15% run-to-run variance. Optimizations are 
 - Manifest-based transfers can emit `FecParity` control messages containing XOR parity for a small batch of chunk indices.
 - **Streaming FEC recovery**: the receiver attempts to recover missing chunks inline as parity groups arrive during transfer, not just after all data is received.
 - Use `--fec-group-size N` on the CLI (or `fec_group_size` in config) to enable. Recommended: 7 (~12.5% overhead) for lossy links, 15 (~6%) for mildly lossy.
-- S3/GCS storage backends are available behind the `s3` cargo feature: `cargo build --features s3`. Use `s3://bucket/key` URLs.
+- S3/GCS storage backends are available behind the `s3` cargo feature: `cargo build -p bytehaul-proto --features s3`. Use `s3://bucket/key` URLs.
 - Resume state encryption uses ChaCha20-Poly1305 with a key derived from the transfer ID via BLAKE3 KDF. Enable with `encrypt_state = true`.
-
-## License
-
-Apache 2.0
 
 ## Contributing
 
@@ -251,3 +254,7 @@ RUST_LOG=debug bytehaul send ./test remote:/path   # Debug logging
 bytehaul send --dry-run ./data remote:/path         # Preview without transferring
 bytehaul -v send ./data remote:/path                # Verbose output
 ```
+
+## License
+
+[Apache 2.0](LICENSE)
